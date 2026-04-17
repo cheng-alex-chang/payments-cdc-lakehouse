@@ -1,0 +1,16 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["prometheus:9090"]
+
+  - job_name: airflow-web
+    static_configs:
+      - targets: ["airflow-webserver:8080"]
+
+  - job_name: trino
+    metrics_path: /v1/info
+    static_configs:
+      - targets: ["trino:8080"]

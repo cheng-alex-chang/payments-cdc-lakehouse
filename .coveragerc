@@ -1,0 +1,10 @@
+[run]
+source =
+    airflow/dags
+    config/spark/jobs
+    scripts
+
+[report]
+omit =
+    */__init__.py
+    scripts/spark_submit_stub.sh

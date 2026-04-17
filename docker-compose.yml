@@ -1,0 +1,310 @@
+services:
+  postgres:
+    image: postgres:15
+    container_name: dp-postgres
+    environment:
+      POSTGRES_DB: payments
+      POSTGRES_USER: dataeng
+      POSTGRES_PASSWORD: dataeng
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./config/postgres/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dataeng -d payments"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.1
+    container_name: dp-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: dp-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+
+  kafka-connect:
+    image: debezium/connect:2.6
+    container_name: dp-kafka-connect
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    ports:
+      - "8083:8083"
+    environment:
+      BOOTSTRAP_SERVERS: kafka:29092
+      GROUP_ID: connect-cluster
+      CONFIG_STORAGE_TOPIC: connect_configs
+      OFFSET_STORAGE_TOPIC: connect_offsets
+      STATUS_STORAGE_TOPIC: connect_statuses
+      CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      STATUS_STORAGE_REPLICATION_FACTOR: 1
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_REST_ADVERTISED_HOST_NAME: kafka-connect
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/connectors"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+
+  namenode:
+    image: apache/hadoop:3
+    container_name: dp-namenode
+    hostname: namenode
+    entrypoint: ["/bin/bash", "-lc"]
+    command:
+      - >
+        if [ ! -d /tmp/hadoop-root/dfs/name/current ]; then
+          hdfs namenode -format -force -nonInteractive;
+        fi;
+        hdfs namenode
+    user: "0:0"
+    environment:
+      ENSURE_NAMENODE_DIR: /tmp/hadoop-root/dfs/name
+    ports:
+      - "9870:9870"
+      - "9000:9000"
+    volumes:
+      - namenode_data:/tmp/hadoop-root/dfs/name
+      - ./config/hadoop/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml
+      - ./config/hadoop/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml
+
+  datanode:
+    image: apache/hadoop:3
+    container_name: dp-datanode
+    hostname: datanode
+    depends_on:
+      - namenode
+    command: ["hdfs", "datanode"]
+    user: "0:0"
+    environment:
+      SERVICE_PRECONDITION: namenode:9870
+    ports:
+      - "9864:9864"
+    volumes:
+      - datanode_data:/tmp/hadoop-root/dfs/data
+      - ./config/hadoop/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml
+      - ./config/hadoop/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml
+
+  metastore-db:
+    image: postgres:15
+    container_name: dp-metastore-db
+    environment:
+      POSTGRES_DB: metastore
+      POSTGRES_USER: hive
+      POSTGRES_PASSWORD: hive
+    ports:
+      - "5433:5432"
+    volumes:
+      - metastore_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hive -d metastore"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  hive-metastore:
+    image: apache/hive:4.0.0
+    container_name: dp-hive-metastore
+    depends_on:
+      metastore-db:
+        condition: service_healthy
+      namenode:
+        condition: service_started
+    ports:
+      - "9083:9083"
+    environment:
+      SERVICE_NAME: metastore
+      DB_DRIVER: postgres
+      SERVICE_OPTS: >-
+        -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://metastore-db:5432/metastore
+        -Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver
+        -Djavax.jdo.option.ConnectionUserName=hive
+        -Djavax.jdo.option.ConnectionPassword=hive
+    volumes:
+      - ./config/hive-metastore/hive-site.xml:/opt/hive/conf/hive-site.xml
+      - ./config/hadoop/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml
+      - ./config/hadoop/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml
+      - ./drivers/postgresql-42.7.5.jar:/opt/hive/lib/postgresql-42.7.5.jar
+
+  trino:
+    image: trinodb/trino:477
+    container_name: dp-trino
+    user: "0:0"
+    depends_on:
+      - hive-metastore
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config/trino/etc:/etc/trino
+      - ./config/trino/catalog:/etc/trino/catalog
+      - .:/opt/project
+      - trino_data:/var/trino/data
+
+  spark:
+    image: spark:3.5.8-python3
+    container_name: dp-spark
+    hostname: spark
+    user: "0:0"
+    entrypoint: ["/bin/bash", "-lc", "while true; do sleep 3600; done"]
+    environment:
+      HADOOP_CONF_DIR: /opt/spark/conf
+    ports:
+      - "4040:4040"
+    volumes:
+      - .:/opt/project
+      - ./config/hadoop/core-site.xml:/opt/spark/conf/core-site.xml
+      - ./config/hadoop/hdfs-site.xml:/opt/spark/conf/hdfs-site.xml
+
+  metabase:
+    image: metabase/metabase:v0.55.8
+    container_name: dp-metabase
+    depends_on:
+      - trino
+    ports:
+      - "3000:3000"
+    environment:
+      MB_DB_FILE: /metabase-data/metabase.db
+    volumes:
+      - metabase_data:/metabase-data
+
+  prometheus:
+    image: prom/prometheus:v3.3.1
+    container_name: dp-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+
+  grafana:
+    image: grafana/grafana:11.6.1
+    container_name: dp-grafana
+    depends_on:
+      - prometheus
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./config/grafana/provisioning:/etc/grafana/provisioning
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards
+
+  airflow-postgres:
+    image: postgres:15
+    container_name: dp-airflow-postgres
+    environment:
+      POSTGRES_DB: airflow
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  airflow-init:
+    build:
+      context: .
+      dockerfile: ./config/airflow/Dockerfile
+    container_name: dp-airflow-init
+    user: "0:0"
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - airflow db migrate && airflow users create --username admin --password admin --firstname Data --lastname Engineer --role Admin --email admin@example.com
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./scripts:/opt/airflow/scripts
+      - ./config:/opt/airflow/config
+      - ./sql:/opt/airflow/sql
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  airflow-webserver:
+    build:
+      context: .
+      dockerfile: ./config/airflow/Dockerfile
+    container_name: dp-airflow-webserver
+    user: "0:0"
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    command: webserver
+    ports:
+      - "8088:8080"
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+      AIRFLOW_CONN_SOURCE_POSTGRES: postgresql://dataeng:dataeng@postgres:5432/payments
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./scripts:/opt/airflow/scripts
+      - ./config:/opt/airflow/config
+      - ./sql:/opt/airflow/sql
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  airflow-scheduler:
+    build:
+      context: .
+      dockerfile: ./config/airflow/Dockerfile
+    container_name: dp-airflow-scheduler
+    user: "0:0"
+    depends_on:
+      airflow-webserver:
+        condition: service_started
+      spark:
+        condition: service_started
+    command: scheduler
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW_CONN_SOURCE_POSTGRES: postgresql://dataeng:dataeng@postgres:5432/payments
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./scripts:/opt/airflow/scripts
+      - ./config:/opt/airflow/config
+      - ./sql:/opt/airflow/sql
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  postgres_data:
+  namenode_data:
+  datanode_data:
+  metastore_db_data:
+  metabase_data:
+  grafana_data:
+  trino_data:

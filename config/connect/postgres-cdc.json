@@ -1,0 +1,22 @@
+{
+  "name": "postgres-payments-cdc",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "plugin.name": "pgoutput",
+    "database.hostname": "postgres",
+    "database.port": "5432",
+    "database.user": "dataeng",
+    "database.password": "dataeng",
+    "database.dbname": "payments",
+    "database.server.name": "payments",
+    "topic.prefix": "cdc",
+    "table.include.list": "public.merchants,public.payments,public.refunds",
+    "slot.name": "payments_cdc_slot",
+    "publication.autocreate.mode": "filtered",
+    "decimal.handling.mode": "double",
+    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "false",
+    "key.converter.schemas.enable": "false"
+  }
+}

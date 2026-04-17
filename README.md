@@ -1,0 +1,166 @@
+# Local CDC Data Platform
+
+A local data engineering project built around:
+
+`Postgres -> Debezium/Kafka Connect -> Kafka -> PySpark -> HDFS -> Hive Metastore -> Trino`
+
+with:
+
+- `Airflow` for orchestration
+- `Metabase` for dashboards
+- `Prometheus + Grafana` for monitoring
+- `pytest` for tests
+
+## Architecture
+
+```text
+Postgres
+  -> Debezium / Kafka Connect
+  -> Kafka topic: cdc.public.payments
+  -> Spark bronze job
+  -> HDFS bronze layer
+  -> Spark silver job
+  -> HDFS silver layer
+  -> Spark gold job
+  -> HDFS gold layer
+  -> Hive external tables
+  -> Trino queries
+```
+
+## Bronze, Silver, Gold
+
+`Bronze`
+- raw ingestion layer
+- stores Kafka CDC payloads from Debezium in HDFS
+
+`Silver`
+- cleaned canonical layer
+- parses Debezium `after` payloads, casts types, normalizes text, converts timestamps, and deduplicates by latest `updated_at`
+
+`Gold`
+- business-ready layer
+- stores aggregated payment metrics such as payment count, gross volume, and authorization rate
+
+## Repo Layout
+
+```text
+airflow/dags/                  Airflow DAGs
+config/airflow/                Airflow Docker image
+config/connect/                Debezium connector config
+config/grafana/                Grafana provisioning and dashboards
+config/hadoop/                 Hadoop config
+config/hive-metastore/         Hive metastore config
+config/postgres/init/          Postgres schema and seed data
+config/prometheus/             Prometheus config
+config/spark/jobs/             Spark jobs
+config/trino/                  Trino config
+scripts/                       helper scripts
+sql/trino/                     Hive table DDL and validation SQL
+tests/                         unit tests
+```
+
+## Run Locally
+
+### Prerequisites
+
+- `Docker Desktop`
+- `docker compose`
+- `Python 3`
+
+### Start the platform
+
+```bash
+docker compose up -d
+```
+
+### Register or refresh the Debezium connector
+
+```bash
+bash scripts/register_connector.sh
+```
+
+### Main URLs
+
+- Airflow: `http://localhost:8088`
+- Kafka Connect: `http://localhost:8083`
+- Trino: `http://localhost:8080`
+- HDFS NameNode UI: `http://localhost:9870`
+- Metabase: `http://localhost:3000`
+- Prometheus: `http://localhost:9090`
+- Grafana: `http://localhost:3001`
+
+### Run tests
+
+```bash
+source .venv/bin/activate
+pytest --cov --cov-report=term-missing
+```
+
+## Airflow Pipeline
+
+The main DAG is `airflow/dags/payments_pipeline.py`.
+
+It runs:
+
+1. `init_hdfs`
+2. `validate_connector`
+3. `bronze_load`
+4. `silver_transform`
+5. `gold_transform`
+6. `publish_trino_tables`
+7. `validate_trino`
+
+Manual trigger:
+
+```bash
+docker exec dp-airflow-webserver airflow dags trigger payments_pipeline
+```
+
+## Demo Flow
+
+### 1. Show the source data in Postgres
+
+```bash
+docker exec dp-postgres psql -U dataeng -d payments -c "SELECT payment_id, amount, payment_status, updated_at FROM payments ORDER BY payment_id;"
+```
+
+### 2. Change a source row
+
+```bash
+docker exec dp-postgres psql -U dataeng -d payments -c "UPDATE payments SET amount = 149.99, payment_status = 'authorized', updated_at = NOW() WHERE payment_id = 1001;"
+```
+
+### 3. Show the CDC event in Kafka
+
+```bash
+docker exec dp-kafka kafka-console-consumer \
+  --bootstrap-server kafka:29092 \
+  --topic cdc.public.payments \
+  --from-beginning \
+  --max-messages 1 \
+  --timeout-ms 5000
+```
+
+### 4. Trigger the Airflow DAG
+
+```bash
+docker exec dp-airflow-webserver airflow dags trigger payments_pipeline
+```
+
+### 5. Confirm the DAG run
+
+```bash
+docker exec dp-airflow-webserver airflow dags list-runs -d payments_pipeline
+```
+
+### 6. Query the silver table in Trino
+
+```bash
+docker exec dp-trino trino --execute "SELECT payment_id, amount, payment_method, payment_status, created_at, updated_at FROM hive.analytics.payments_silver"
+```
+
+### 7. Query the gold table in Trino
+
+```bash
+docker exec dp-trino trino --execute "SELECT * FROM hive.analytics.payment_metrics_gold ORDER BY payment_hour, country_code, payment_method"
+```
