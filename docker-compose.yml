@@ -192,6 +192,25 @@ services:
     volumes:
       - metabase_data:/metabase-data
 
+  statsd-exporter:
+    image: prom/statsd-exporter:latest
+    container_name: dp-statsd-exporter
+    ports:
+      - "9125:9125/udp"
+      - "9102:9102"
+    volumes:
+      - ./config/statsd/mapping.yml:/etc/statsd/mapping.yml
+    command: --statsd.mapping-config=/etc/statsd/mapping.yml
+
+  trino-exporter:
+    build:
+      context: ./config/trino-exporter
+    container_name: dp-trino-exporter
+    depends_on:
+      - trino
+    ports:
+      - "9104:8000"
+
   prometheus:
     image: prom/prometheus:v3.3.1
     container_name: dp-prometheus
@@ -269,6 +288,10 @@ services:
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
       AIRFLOW_CONN_SOURCE_POSTGRES: postgresql://dataeng:dataeng@postgres:5432/payments
+      AIRFLOW__METRICS__STATSD_ON: "true"
+      AIRFLOW__METRICS__STATSD_HOST: statsd-exporter
+      AIRFLOW__METRICS__STATSD_PORT: "9125"
+      AIRFLOW__METRICS__STATSD_PREFIX: "airflow"
     volumes:
       - ./airflow/dags:/opt/airflow/dags
       - ./scripts:/opt/airflow/scripts
@@ -293,6 +316,10 @@ services:
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW_CONN_SOURCE_POSTGRES: postgresql://dataeng:dataeng@postgres:5432/payments
+      AIRFLOW__METRICS__STATSD_ON: "true"
+      AIRFLOW__METRICS__STATSD_HOST: statsd-exporter
+      AIRFLOW__METRICS__STATSD_PORT: "9125"
+      AIRFLOW__METRICS__STATSD_PREFIX: "airflow"
     volumes:
       - ./airflow/dags:/opt/airflow/dags
       - ./scripts:/opt/airflow/scripts

@@ -8,11 +8,13 @@ import sys
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
 LOGGER = logging.getLogger(__name__)
 
+_ICEBERG = "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1"
+_KAFKA   = "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.8"
 
 JOB_MAP = {
-    "bronze": "docker exec dp-spark /opt/spark/bin/spark-submit --master local[*] --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.8 /opt/project/config/spark/jobs/bronze_from_kafka.py",
-    "silver": "docker exec dp-spark /opt/spark/bin/spark-submit --master local[*] /opt/project/config/spark/jobs/silver_payments.py",
-    "gold": "docker exec dp-spark /opt/spark/bin/spark-submit --master local[*] /opt/project/config/spark/jobs/gold_metrics.py",
+    "bronze": f"docker exec dp-spark /opt/spark/bin/spark-submit --master local[*] --packages {_KAFKA},{_ICEBERG} /opt/project/config/spark/jobs/bronze_from_kafka.py",
+    "silver": f"docker exec dp-spark /opt/spark/bin/spark-submit --master local[*] --packages {_ICEBERG} /opt/project/config/spark/jobs/silver_payments.py",
+    "gold":   f"docker exec dp-spark /opt/spark/bin/spark-submit --master local[*] --packages {_ICEBERG} /opt/project/config/spark/jobs/gold_metrics.py",
 }
 
 

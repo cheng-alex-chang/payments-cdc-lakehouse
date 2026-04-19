@@ -2,44 +2,43 @@
 
 A local data engineering project built around:
 
-`Postgres -> Debezium/Kafka Connect -> Kafka -> PySpark -> HDFS -> Hive Metastore -> Trino`
+`Postgres -> Debezium/Kafka Connect -> Kafka -> PySpark -> Iceberg on HDFS -> Trino`
 
 with:
 
 - `Airflow` for orchestration
+- `Hive Metastore` as the Iceberg catalog
 - `Metabase` for dashboards
 - `Prometheus + Grafana` for monitoring
 - `pytest` for tests
+
+See [docs/design.md](docs/design.md) for layer contracts, incremental processing, CDC delete handling, and known limitations.
 
 ## Architecture
 
 ```text
 Postgres
-  -> Debezium / Kafka Connect
+  -> Debezium / Kafka Connect            CDC via logical replication
   -> Kafka topic: cdc.public.payments
-  -> Spark bronze job
-  -> HDFS bronze layer
-  -> Spark silver job
-  -> HDFS silver layer
-  -> Spark gold job
-  -> HDFS gold layer
-  -> Hive external tables
-  -> Trino queries
+  -> Spark bronze job                    Structured Streaming -> Iceberg append
+  -> Spark silver job                    foreachBatch -> Iceberg MERGE / DELETE
+  -> Spark gold job                      Batch SQL -> Iceberg MERGE
+  -> Trino                               SQL over Iceberg via Hive Metastore
 ```
 
 ## Bronze, Silver, Gold
 
 `Bronze`
-- raw ingestion layer
-- stores Kafka CDC payloads from Debezium in HDFS
+- Raw Kafka envelope written to Iceberg, append-only
+- Streaming with `trigger(availableNow=True)` and HDFS checkpoint
 
 `Silver`
-- cleaned canonical layer
-- parses Debezium `after` payloads, casts types, normalizes text, converts timestamps, and deduplicates by latest `updated_at`
+- Canonical payment records, typed and normalised
+- `foreachBatch` issues `MERGE INTO` for upserts (`op` in c, u, r) and `DELETE FROM` for Debezium deletes (`op=d`)
 
 `Gold`
-- business-ready layer
-- stores aggregated payment metrics such as payment count, gross volume, and authorization rate
+- Hourly aggregates per country and payment method (count, gross volume, auth rate)
+- Idempotent full recalculation via `MERGE INTO` on every run
 
 ## Repo Layout
 
@@ -53,10 +52,13 @@ config/hive-metastore/         Hive metastore config
 config/postgres/init/          Postgres schema and seed data
 config/prometheus/             Prometheus config
 config/spark/jobs/             Spark jobs
-config/trino/                  Trino config
-scripts/                       helper scripts
-sql/trino/                     Hive table DDL and validation SQL
-tests/                         unit tests
+config/statsd/                 StatsD exporter mapping for Airflow metrics
+config/trino/                  Trino config and Iceberg catalog
+config/trino-exporter/         Custom Trino REST -> Prometheus exporter
+docs/                          Design docs
+scripts/                       Helper scripts
+sql/trino/                     Trino validation SQL
+tests/                         Unit tests
 ```
 
 ## Run Locally
@@ -156,11 +158,11 @@ docker exec dp-airflow-webserver airflow dags list-runs -d payments_pipeline
 ### 6. Query the silver table in Trino
 
 ```bash
-docker exec dp-trino trino --execute "SELECT payment_id, amount, payment_method, payment_status, created_at, updated_at FROM hive.analytics.payments_silver"
+docker exec dp-trino trino --execute "SELECT payment_id, amount, payment_method, payment_status, created_at, updated_at FROM iceberg.analytics.payments_silver"
 ```
 
 ### 7. Query the gold table in Trino
 
 ```bash
-docker exec dp-trino trino --execute "SELECT * FROM hive.analytics.payment_metrics_gold ORDER BY payment_hour, country_code, payment_method"
+docker exec dp-trino trino --execute "SELECT * FROM iceberg.analytics.payment_metrics_gold ORDER BY payment_hour, country_code, payment_method"
 ```

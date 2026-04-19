@@ -3,38 +3,64 @@ from __future__ import annotations
 import logging
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import avg, col, count, date_trunc, sum, when
 
 
-SILVER_PATH = "hdfs://namenode:9000/data/silver/payments"
-GOLD_PATH = "hdfs://namenode:9000/data/gold/payment_metrics"
-
+SILVER_TABLE = "iceberg.analytics.payments_silver"
+GOLD_TABLE   = "iceberg.analytics.payment_metrics_gold"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
 LOGGER = logging.getLogger(__name__)
 
 
 def main() -> None:
-    LOGGER.info("Starting gold aggregation from %s", SILVER_PATH)
-    spark = SparkSession.builder.appName("gold-metrics").getOrCreate()
-
-    payments = spark.read.parquet(SILVER_PATH)
-
-    gold = (
-        payments.withColumn("payment_hour", date_trunc("hour", col("created_at")))
-        .groupBy("payment_hour", "country_code", "payment_method")
-        .agg(
-            count("*").alias("payment_count"),
-            sum("amount").alias("gross_volume"),
-            avg(when(payments.payment_status == "authorized", 1).otherwise(0)).alias("auth_rate"),
-        )
+    LOGGER.info("Starting gold aggregation from %s", SILVER_TABLE)
+    spark = (
+        SparkSession.builder
+        .appName("gold-metrics")
+        .config("spark.sql.extensions",
+                "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
+        .config("spark.sql.catalog.iceberg",          "org.apache.iceberg.spark.SparkCatalog")
+        .config("spark.sql.catalog.iceberg.type",     "hive")
+        .config("spark.sql.catalog.iceberg.uri",      "thrift://hive-metastore:9083")
+        .config("spark.sql.catalog.iceberg.warehouse","hdfs://namenode:9000/warehouse")
+        .getOrCreate()
     )
 
-    LOGGER.info("Writing gold dataset to %s", GOLD_PATH)
-    gold.write.mode("overwrite").parquet(GOLD_PATH)
-    LOGGER.info("Gold dataset write completed")
+    spark.sql(f"""
+        CREATE TABLE IF NOT EXISTS {GOLD_TABLE} (
+            payment_hour   TIMESTAMP,
+            country_code   STRING,
+            payment_method STRING,
+            payment_count  BIGINT,
+            gross_volume   DOUBLE,
+            auth_rate      DOUBLE
+        )
+        USING iceberg
+        PARTITIONED BY (days(payment_hour))
+    """)
+
+    spark.sql(f"""
+        MERGE INTO {GOLD_TABLE} t
+        USING (
+            SELECT
+                date_trunc('hour', created_at)                                       AS payment_hour,
+                country_code,
+                payment_method,
+                count(*)                                                              AS payment_count,
+                sum(amount)                                                           AS gross_volume,
+                avg(CASE WHEN payment_status = 'authorized' THEN 1.0 ELSE 0.0 END)   AS auth_rate
+            FROM {SILVER_TABLE}
+            GROUP BY 1, 2, 3
+        ) s
+        ON  t.payment_hour   = s.payment_hour
+        AND t.country_code   = s.country_code
+        AND t.payment_method = s.payment_method
+        WHEN MATCHED     THEN UPDATE SET *
+        WHEN NOT MATCHED THEN INSERT *
+    """)
+
+    LOGGER.info("Gold aggregation completed")
     spark.stop()
-    LOGGER.info("Spark session stopped for gold job")
 
 
 if __name__ == "__main__":  # pragma: no cover

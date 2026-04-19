@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from pyspark.sql import SparkSession
+from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql.functions import (
     col,
     current_timestamp,
@@ -10,67 +10,108 @@ from pyspark.sql.functions import (
     get_json_object,
     lower,
     regexp_replace,
-    row_number,
     trim,
     upper,
 )
-from pyspark.sql.window import Window
 
 
-BRONZE_PATH = "hdfs://namenode:9000/data/bronze/payments_cdc"
-SILVER_PATH = "hdfs://namenode:9000/data/silver/payments"
-
+BRONZE_TABLE    = "iceberg.analytics.payments_bronze"
+SILVER_TABLE    = "iceberg.analytics.payments_silver"
+CHECKPOINT_PATH = "hdfs://namenode:9000/checkpoints/silver"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
 LOGGER = logging.getLogger(__name__)
 
 
-def main() -> None:
-    LOGGER.info("Starting silver transformation from %s", BRONZE_PATH)
-    spark = SparkSession.builder.appName("silver-payments").getOrCreate()
+def _upsert_to_silver(batch_df: DataFrame, batch_id: int) -> None:
+    spark = batch_df.sparkSession
 
-    bronze = spark.read.parquet(BRONZE_PATH)
-    dedupe_window = Window.partitionBy("payment_id").orderBy(col("updated_at").desc())
-
-    silver = (
-        bronze.withColumn("payment_id", get_json_object(col("message_value"), "$.after.payment_id").cast("long"))
-        .withColumn("merchant_id", get_json_object(col("message_value"), "$.after.merchant_id").cast("long"))
-        .withColumn("shopper_id", get_json_object(col("message_value"), "$.after.shopper_id").cast("long"))
-        .withColumn("amount", get_json_object(col("message_value"), "$.after.amount").cast("double"))
-        .withColumn("currency", upper(trim(get_json_object(col("message_value"), "$.after.currency"))))
-        .withColumn(
-            "payment_method",
-            regexp_replace(lower(trim(get_json_object(col("message_value"), "$.after.payment_method"))), r"\s+", "_"),
+    upserts = (
+        batch_df
+        .filter(get_json_object(col("kafka_value"), "$.op").isin("c", "u", "r"))
+        .select(
+            get_json_object(col("kafka_value"), "$.after.payment_id").cast("long").alias("payment_id"),
+            get_json_object(col("kafka_value"), "$.after.merchant_id").cast("long").alias("merchant_id"),
+            get_json_object(col("kafka_value"), "$.after.amount").cast("double").alias("amount"),
+            upper(trim(get_json_object(col("kafka_value"), "$.after.currency"))).alias("currency"),
+            regexp_replace(lower(trim(get_json_object(col("kafka_value"), "$.after.payment_method"))), r"\s+", "_").alias("payment_method"),
+            regexp_replace(lower(trim(get_json_object(col("kafka_value"), "$.after.payment_status"))), r"\s+", "_").alias("payment_status"),
+            upper(trim(get_json_object(col("kafka_value"), "$.after.country_code"))).alias("country_code"),
+            from_unixtime(get_json_object(col("kafka_value"), "$.after.created_at").cast("double") / 1_000_000).cast("timestamp").alias("created_at"),
+            from_unixtime(get_json_object(col("kafka_value"), "$.after.updated_at").cast("double") / 1_000_000).cast("timestamp").alias("updated_at"),
+            current_timestamp().alias("ingested_at"),
         )
-        .withColumn(
-            "payment_status",
-            regexp_replace(lower(trim(get_json_object(col("message_value"), "$.after.payment_status"))), r"\s+", "_"),
-        )
-        .withColumn("country_code", upper(trim(get_json_object(col("message_value"), "$.after.country_code"))))
-        .withColumn(
-            "created_at",
-            from_unixtime(
-                get_json_object(col("message_value"), "$.after.created_at").cast("double") / 1000000
-            ).cast("timestamp"),
-        )
-        .withColumn(
-            "updated_at",
-            from_unixtime(
-                get_json_object(col("message_value"), "$.after.updated_at").cast("double") / 1000000
-            ).cast("timestamp"),
-        )
-        .withColumn("row_number", row_number().over(dedupe_window))
         .filter(col("payment_id").isNotNull())
-        .filter(col("row_number") == 1)
-        .drop("row_number")
-        .withColumn("ingested_at", current_timestamp())
     )
 
-    LOGGER.info("Writing silver dataset to %s", SILVER_PATH)
-    silver.write.mode("overwrite").parquet(SILVER_PATH)
-    LOGGER.info("Silver dataset write completed")
+    if not upserts.isEmpty():
+        upserts.createOrReplaceTempView("_silver_upserts")
+        spark.sql(f"""
+            MERGE INTO {SILVER_TABLE} t
+            USING _silver_upserts s ON t.payment_id = s.payment_id
+            WHEN MATCHED     THEN UPDATE SET *
+            WHEN NOT MATCHED THEN INSERT *
+        """)
+
+    deletes = (
+        batch_df
+        .filter(get_json_object(col("kafka_value"), "$.op") == "d")
+        .select(get_json_object(col("kafka_value"), "$.before.payment_id").cast("long").alias("payment_id"))
+        .filter(col("payment_id").isNotNull())
+    )
+
+    if not deletes.isEmpty():
+        deletes.createOrReplaceTempView("_silver_deletes")
+        spark.sql(f"""
+            DELETE FROM {SILVER_TABLE}
+            WHERE payment_id IN (SELECT payment_id FROM _silver_deletes)
+        """)
+
+
+def main() -> None:
+    LOGGER.info("Starting silver transformation from %s", BRONZE_TABLE)
+    spark = (
+        SparkSession.builder
+        .appName("silver-payments")
+        .config("spark.sql.extensions",
+                "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
+        .config("spark.sql.catalog.iceberg",          "org.apache.iceberg.spark.SparkCatalog")
+        .config("spark.sql.catalog.iceberg.type",     "hive")
+        .config("spark.sql.catalog.iceberg.uri",      "thrift://hive-metastore:9083")
+        .config("spark.sql.catalog.iceberg.warehouse","hdfs://namenode:9000/warehouse")
+        .getOrCreate()
+    )
+
+    spark.sql(f"""
+        CREATE TABLE IF NOT EXISTS {SILVER_TABLE} (
+            payment_id     BIGINT,
+            merchant_id    BIGINT,
+            amount         DOUBLE,
+            currency       STRING,
+            payment_method STRING,
+            payment_status STRING,
+            country_code   STRING,
+            created_at     TIMESTAMP,
+            updated_at     TIMESTAMP,
+            ingested_at    TIMESTAMP
+        )
+        USING iceberg
+        PARTITIONED BY (days(created_at))
+    """)
+
+    query = (
+        spark.readStream
+        .format("iceberg")
+        .load(BRONZE_TABLE)
+        .writeStream
+        .trigger(availableNow=True)
+        .option("checkpointLocation", CHECKPOINT_PATH)
+        .foreachBatch(_upsert_to_silver)
+        .start()
+    )
+    query.awaitTermination()
+    LOGGER.info("Silver streaming job completed")
     spark.stop()
-    LOGGER.info("Spark session stopped for silver job")
 
 
 if __name__ == "__main__":  # pragma: no cover

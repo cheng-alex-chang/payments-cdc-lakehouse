@@ -1,29 +1,79 @@
 {
-  "annotations": {
-    "list": []
-  },
+  "annotations": { "list": [] },
   "editable": true,
   "graphTooltip": 0,
   "panels": [
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 0
-      },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
       "id": 1,
-      "title": "Prometheus Up Targets",
+      "title": "Up Targets",
       "type": "stat",
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [{ "expr": "sum(up)", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "id": 2,
+      "title": "Trino Coordinator Up",
+      "type": "stat",
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [{ "expr": "trino_coordinator_up", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "id": 3,
+      "title": "Trino Running Queries",
+      "type": "stat",
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [{ "expr": "trino_running_queries", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "id": 4,
+      "title": "Trino Queued Queries",
+      "type": "stat",
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [{ "expr": "trino_queued_queries", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "id": 5,
+      "title": "Airflow Scheduler Heartbeat",
+      "type": "timeseries",
+      "targets": [{ "expr": "rate(airflow_scheduler_heartbeat[5m])", "legendFormat": "heartbeat/s", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "id": 6,
+      "title": "Task Completions by State",
+      "type": "timeseries",
+      "targets": [{ "expr": "sum by (state) (rate(airflow_ti_finish_total[5m]))", "legendFormat": "{{state}}", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "id": 7,
+      "title": "DAG Bag Size",
+      "type": "timeseries",
+      "targets": [{ "expr": "airflow_dagbag_size", "legendFormat": "DAGs loaded", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "id": 8,
+      "title": "Trino Query Activity",
+      "type": "timeseries",
       "targets": [
-        {
-          "expr": "sum(up)",
-          "refId": "A"
-        }
+        { "expr": "trino_running_queries",  "legendFormat": "running",  "refId": "A" },
+        { "expr": "trino_queued_queries",   "legendFormat": "queued",   "refId": "B" },
+        { "expr": "trino_finished_queries", "legendFormat": "finished", "refId": "C" },
+        { "expr": "trino_failed_queries",   "legendFormat": "failed",   "refId": "D" }
       ]
     }
   ],
@@ -31,5 +81,5 @@
   "style": "dark",
   "tags": ["data-platform"],
   "title": "Platform Overview",
-  "version": 1
+  "version": 2
 }

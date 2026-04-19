@@ -8,7 +8,12 @@ def run_hdfs(command: str) -> None:
 
 
 def main() -> None:
-    run_hdfs("-mkdir -p /data/bronze /data/silver /data/gold /warehouse /warehouse/analytics.db")
+    run_hdfs(
+        "-mkdir -p "
+        "/data/bronze /data/silver /data/gold "
+        "/warehouse /warehouse/analytics.db "
+        "/checkpoints/bronze /checkpoints/silver /checkpoints/gold"
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover

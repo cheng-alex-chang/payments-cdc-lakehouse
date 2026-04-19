@@ -17,13 +17,15 @@ def main() -> None:
 
     connector_state = payload["connector"]["state"]
     LOGGER.info("Connector state: %s", connector_state)
-    if connector_state != "RUNNING":
-        raise SystemExit(f"Connector not healthy: {connector_state}")
 
     tasks = payload.get("tasks", [])
     failed = [task for task in tasks if task.get("state") != "RUNNING"]
     if failed:
         raise SystemExit(f"Connector tasks unhealthy: {failed}")
+
+    # UNASSIGNED is a transient rebalance state; the tasks being RUNNING means CDC is active
+    if connector_state not in ("RUNNING", "UNASSIGNED"):
+        raise SystemExit(f"Connector not healthy: {connector_state}")
 
     LOGGER.info("Connector tasks healthy: %s", len(tasks))
     print("Connector healthy")

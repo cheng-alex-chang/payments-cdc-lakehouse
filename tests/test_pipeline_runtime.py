@@ -10,38 +10,107 @@ from pathlib import Path
 import pytest
 
 
+# ---------------------------------------------------------------------------
+# Fake streaming primitives
+# ---------------------------------------------------------------------------
+
+class FakeStreamQuery:
+    def awaitTermination(self) -> None:
+        pass
+
+
+class FakeStreamWriter:
+    def __init__(self) -> None:
+        self.format_value: str | None = None
+        self.output_mode_value: str | None = None
+        self.trigger_kwargs: dict = {}
+        self.options: dict = {}
+        self.foreach_batch_fn = None
+        self.to_table_name: str | None = None
+
+    def format(self, name: str) -> "FakeStreamWriter":
+        self.format_value = name
+        return self
+
+    def outputMode(self, mode: str) -> "FakeStreamWriter":
+        self.output_mode_value = mode
+        return self
+
+    def trigger(self, **kwargs) -> "FakeStreamWriter":
+        self.trigger_kwargs = kwargs
+        return self
+
+    def option(self, key: str, value: str) -> "FakeStreamWriter":
+        self.options[key] = value
+        return self
+
+    def foreachBatch(self, fn) -> "FakeStreamWriter":
+        self.foreach_batch_fn = fn
+        return self
+
+    def start(self) -> FakeStreamQuery:
+        return FakeStreamQuery()
+
+    def toTable(self, name: str) -> FakeStreamQuery:
+        self.to_table_name = name
+        return FakeStreamQuery()
+
+
+class FakeStreamFrame:
+    def __init__(self) -> None:
+        self.writeStream = FakeStreamWriter()
+
+    def select(self, *args) -> "FakeStreamFrame":
+        return self
+
+    def filter(self, *args) -> "FakeStreamFrame":
+        return self
+
+    def __getattr__(self, name: str) -> "FakeStreamFrame":
+        return self
+
+
+class FakeStreamReader:
+    def __init__(self) -> None:
+        self.format_value: str | None = None
+        self.options: dict = {}
+        self.load_path: str | None = None
+        self._frame = FakeStreamFrame()
+
+    def format(self, name: str) -> "FakeStreamReader":
+        self.format_value = name
+        return self
+
+    def option(self, key: str, value: str) -> "FakeStreamReader":
+        self.options[key] = value
+        return self
+
+    def load(self, path: str | None = None) -> FakeStreamFrame:
+        self.load_path = path
+        return self._frame
+
+
+# ---------------------------------------------------------------------------
+# Fake batch primitives
+# ---------------------------------------------------------------------------
+
 class FakeExpr:
     def __init__(self, name: str | None = None) -> None:
         self.name = name
 
-    def cast(self, _value: str) -> "FakeExpr":
-        return self
-
-    def alias(self, _value: str) -> "FakeExpr":
-        return self
-
-    def desc(self) -> "FakeExpr":
-        return self
-
-    def over(self, _window: object) -> "FakeExpr":
-        return self
-
-    def otherwise(self, _value: object) -> "FakeExpr":
-        return self
-
-    def isNotNull(self) -> "FakeExpr":
-        return self
-
-    def __truediv__(self, _other: object) -> "FakeExpr":
-        return self
-
-    def __eq__(self, _other: object) -> "FakeExpr":  # type: ignore[override]
-        return self
+    def cast(self, _value: str) -> "FakeExpr": return self
+    def alias(self, _value: str) -> "FakeExpr": return self
+    def desc(self) -> "FakeExpr": return self
+    def over(self, _window: object) -> "FakeExpr": return self
+    def otherwise(self, _value: object) -> "FakeExpr": return self
+    def isNotNull(self) -> "FakeExpr": return self
+    def isin(self, *args) -> "FakeExpr": return self
+    def __truediv__(self, _other: object) -> "FakeExpr": return self
+    def __eq__(self, _other: object) -> "FakeExpr": return self  # type: ignore[override]
 
 
 class FakeWriter:
-    def __init__(self, frame: "FakeFrame") -> None:
-        self.frame = frame
+    def __init__(self) -> None:
         self.mode_value: str | None = None
         self.parquet_path: str | None = None
 
@@ -65,7 +134,7 @@ class FakeGroupedFrame:
 class FakeFrame:
     def __init__(self) -> None:
         self.operations: list[tuple[str, object]] = []
-        self.write = FakeWriter(self)
+        self.write = FakeWriter()
 
     def withColumn(self, name: str, _value: object) -> "FakeFrame":
         self.operations.append(("withColumn", name))
@@ -87,6 +156,16 @@ class FakeFrame:
         self.operations.append(("groupBy", columns))
         return FakeGroupedFrame(self)
 
+    def isEmpty(self) -> bool:
+        return False
+
+    def createOrReplaceTempView(self, name: str) -> None:
+        pass
+
+    @property
+    def sparkSession(self) -> "FakeSparkSession":
+        return _current_fake_spark
+
     def __getattr__(self, name: str) -> FakeExpr:
         return FakeExpr(name)
 
@@ -96,7 +175,6 @@ class FakeReader:
         self.frame = frame
         self.options: list[tuple[str, object]] = []
         self.format_name: str | None = None
-        self.csv_path: str | None = None
         self.parquet_path: str | None = None
 
     def option(self, key: str, value: object) -> "FakeReader":
@@ -107,10 +185,6 @@ class FakeReader:
         self.format_name = name
         return self
 
-    def csv(self, path: str) -> FakeFrame:
-        self.csv_path = path
-        return self.frame
-
     def parquet(self, path: str) -> FakeFrame:
         self.parquet_path = path
         return self.frame
@@ -119,14 +193,24 @@ class FakeReader:
         return self.frame
 
 
+# global ref so FakeFrame.sparkSession can reach it
+_current_fake_spark: "FakeSparkSession | None" = None
+
+
 class FakeSparkSession:
     def __init__(self) -> None:
         self.frame = FakeFrame()
         self.read = FakeReader(self.frame)
+        self.readStream = FakeStreamReader()
+        self.sql_calls: list[str] = []
         self.stopped = False
 
     def stop(self) -> None:
         self.stopped = True
+
+    def sql(self, query: str) -> FakeFrame:
+        self.sql_calls.append(query.strip())
+        return self.frame
 
 
 class FakeBuilder:
@@ -148,41 +232,29 @@ class FakeBuilder:
 
 
 def load_module_with_fake_pyspark(monkeypatch: pytest.MonkeyPatch, module_name: str):
+    global _current_fake_spark
     spark = FakeSparkSession()
+    _current_fake_spark = spark
     builder = FakeBuilder(spark)
     spark_session_class = type("FakeSparkSessionClass", (), {"builder": builder})
 
     sql_module = types.ModuleType("pyspark.sql")
     sql_module.SparkSession = spark_session_class
+    sql_module.DataFrame = object
 
     functions_module = types.ModuleType("pyspark.sql.functions")
     for name in [
-        "avg",
-        "col",
-        "count",
-        "current_timestamp",
-        "date_trunc",
-        "from_unixtime",
-        "get_json_object",
-        "input_file_name",
-        "lower",
-        "regexp_replace",
-        "sum",
-        "trim",
-        "upper",
-        "when",
+        "avg", "col", "count", "current_timestamp", "date_trunc",
+        "from_unixtime", "get_json_object", "input_file_name", "lower",
+        "regexp_replace", "sum", "trim", "upper", "when",
     ]:
-        setattr(functions_module, name, lambda *args, **kwargs: FakeExpr(name))
-
+        setattr(functions_module, name, lambda *args, name=name, **kwargs: FakeExpr(name))
     functions_module.row_number = lambda: FakeExpr("row_number")
 
     window_module = types.ModuleType("pyspark.sql.window")
     window_module.Window = type(
-        "FakeWindow",
-        (),
-        {
-            "partitionBy": staticmethod(lambda *args: type("FakeOrderedWindow", (), {"orderBy": lambda self, *cols: object()})()),
-        },
+        "FakeWindow", (),
+        {"partitionBy": staticmethod(lambda *args: type("FakeOrderedWindow", (), {"orderBy": lambda self, *cols: object()})())},
     )
 
     monkeypatch.setitem(sys.modules, "pyspark", types.ModuleType("pyspark"))
@@ -194,15 +266,28 @@ def load_module_with_fake_pyspark(monkeypatch: pytest.MonkeyPatch, module_name: 
     return module, spark, builder
 
 
+# ---------------------------------------------------------------------------
+# run_local_job
+# ---------------------------------------------------------------------------
+
+_ICEBERG = "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1"
+_KAFKA   = "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.8"
+
 @pytest.mark.parametrize(
     ("job_name", "expected_command"),
     [
         (
             "bronze",
-            "docker exec dp-spark /opt/spark/bin/spark-submit --master local[*] --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.8 /opt/project/config/spark/jobs/bronze_from_kafka.py",
+            f"docker exec dp-spark /opt/spark/bin/spark-submit --master local[*] --packages {_KAFKA},{_ICEBERG} /opt/project/config/spark/jobs/bronze_from_kafka.py",
         ),
-        ("silver", "docker exec dp-spark /opt/spark/bin/spark-submit --master local[*] /opt/project/config/spark/jobs/silver_payments.py"),
-        ("gold", "docker exec dp-spark /opt/spark/bin/spark-submit --master local[*] /opt/project/config/spark/jobs/gold_metrics.py"),
+        (
+            "silver",
+            f"docker exec dp-spark /opt/spark/bin/spark-submit --master local[*] --packages {_ICEBERG} /opt/project/config/spark/jobs/silver_payments.py",
+        ),
+        (
+            "gold",
+            f"docker exec dp-spark /opt/spark/bin/spark-submit --master local[*] --packages {_ICEBERG} /opt/project/config/spark/jobs/gold_metrics.py",
+        ),
     ],
 )
 def test_run_local_job_dispatches_expected_command(
@@ -211,14 +296,9 @@ def test_run_local_job_dispatches_expected_command(
     from scripts import run_local_job
 
     recorded: list[tuple[str, bool, bool]] = []
-    monkeypatch.setattr(
-        run_local_job.subprocess,
-        "run",
-        lambda command, shell, check: recorded.append((command, shell, check)),
-    )
-
+    monkeypatch.setattr(run_local_job.subprocess, "run",
+                        lambda command, shell, check: recorded.append((command, shell, check)))
     run_local_job.main(job_name)
-
     assert recorded == [(expected_command, True, True)]
 
 
@@ -229,37 +309,50 @@ def test_run_local_job_rejects_unknown_job() -> None:
         run_local_job.main("invalid")
 
 
+# ---------------------------------------------------------------------------
+# init_hdfs
+# ---------------------------------------------------------------------------
+
 def test_init_hdfs_runs_expected_mkdir(monkeypatch: pytest.MonkeyPatch) -> None:
     from scripts import init_hdfs
 
     recorded: list[str] = []
     monkeypatch.setattr(init_hdfs, "run_hdfs", recorded.append)
-
     init_hdfs.main()
 
-    assert recorded == ["-mkdir -p /data/bronze /data/silver /data/gold /warehouse /warehouse/analytics.db"]
+    assert recorded == [
+        "-mkdir -p "
+        "/data/bronze /data/silver /data/gold "
+        "/warehouse /warehouse/analytics.db "
+        "/checkpoints/bronze /checkpoints/silver /checkpoints/gold"
+    ]
 
 
 def test_init_hdfs_run_hdfs_invokes_subprocess(monkeypatch: pytest.MonkeyPatch) -> None:
     from scripts import init_hdfs
 
     recorded: list[tuple[str, bool, bool]] = []
-    monkeypatch.setattr(
-        init_hdfs.subprocess,
-        "run",
-        lambda command, shell, check: recorded.append((command, shell, check)),
-    )
-
+    monkeypatch.setattr(init_hdfs.subprocess, "run",
+                        lambda command, shell, check: recorded.append((command, shell, check)))
     init_hdfs.run_hdfs("-ls /data")
-
     assert recorded == [("docker exec dp-namenode hdfs dfs -ls /data", True, True)]
 
+
+# ---------------------------------------------------------------------------
+# trino scripts
+# ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize(
     ("module_name", "expected_command"),
     [
-        ("scripts.publish_trino_tables", "docker exec dp-trino trino --file /opt/project/sql/trino/create_hive_tables.sql"),
-        ("scripts.validate_trino", "docker exec dp-trino trino --file /opt/project/sql/trino/validation_queries.sql"),
+        (
+            "scripts.publish_trino_tables",
+            'docker exec dp-trino trino --execute "SHOW TABLES IN iceberg.analytics"',
+        ),
+        (
+            "scripts.validate_trino",
+            "docker exec dp-trino trino --file /opt/project/sql/trino/validation_queries.sql",
+        ),
     ],
 )
 def test_trino_scripts_execute_expected_command(
@@ -267,39 +360,30 @@ def test_trino_scripts_execute_expected_command(
 ) -> None:
     module = importlib.import_module(module_name)
     recorded: list[tuple[str, bool, bool]] = []
-    monkeypatch.setattr(
-        module.subprocess,
-        "run",
-        lambda command, shell, check: recorded.append((command, shell, check)),
-    )
-
+    monkeypatch.setattr(module.subprocess, "run",
+                        lambda command, shell, check: recorded.append((command, shell, check)))
     module.main()
-
     assert recorded == [(expected_command, True, True)]
 
 
-def test_validate_connector_accepts_healthy_payload(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+# ---------------------------------------------------------------------------
+# validate_connector
+# ---------------------------------------------------------------------------
+
+def test_validate_connector_accepts_healthy_payload(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     from scripts import validate_connector
 
-    payload = {
-        "connector": {"state": "RUNNING"},
-        "tasks": [{"state": "RUNNING"}, {"state": "RUNNING"}],
-    }
+    payload = {"connector": {"state": "RUNNING"}, "tasks": [{"state": "RUNNING"}, {"state": "RUNNING"}]}
 
     class Response:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb) -> None:
-            return None
-
-        def read(self) -> bytes:
-            return json.dumps(payload).encode("utf-8")
+        def __enter__(self): return self
+        def __exit__(self, exc_type, exc, tb): return None
+        def read(self) -> bytes: return json.dumps(payload).encode()
 
     monkeypatch.setattr(validate_connector, "urlopen", lambda *args, **kwargs: Response())
-
     validate_connector.main()
-
     assert "Connector healthy" in capsys.readouterr().out
 
 
@@ -309,90 +393,211 @@ def test_validate_connector_rejects_unhealthy_connector(monkeypatch: pytest.Monk
     payload = {"connector": {"state": "FAILED"}, "tasks": []}
 
     class Response:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb) -> None:
-            return None
-
-        def read(self) -> bytes:
-            return json.dumps(payload).encode("utf-8")
+        def __enter__(self): return self
+        def __exit__(self, exc_type, exc, tb): return None
+        def read(self) -> bytes: return json.dumps(payload).encode()
 
     monkeypatch.setattr(validate_connector, "urlopen", lambda *args, **kwargs: Response())
-
     with pytest.raises(SystemExit, match="Connector not healthy: FAILED"):
         validate_connector.main()
+
+
+def test_validate_connector_accepts_unassigned_with_running_tasks(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts import validate_connector
+
+    payload = {"connector": {"state": "UNASSIGNED"}, "tasks": [{"state": "RUNNING"}]}
+
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, exc_type, exc, tb): return None
+        def read(self) -> bytes: return json.dumps(payload).encode()
+
+    monkeypatch.setattr(validate_connector, "urlopen", lambda *args, **kwargs: Response())
+    validate_connector.main()  # should not raise
 
 
 def test_validate_connector_rejects_failed_tasks(monkeypatch: pytest.MonkeyPatch) -> None:
     from scripts import validate_connector
 
-    payload = {
-        "connector": {"state": "RUNNING"},
-        "tasks": [{"state": "RUNNING"}, {"state": "FAILED"}],
-    }
+    payload = {"connector": {"state": "RUNNING"}, "tasks": [{"state": "RUNNING"}, {"state": "FAILED"}]}
 
     class Response:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb) -> None:
-            return None
-
-        def read(self) -> bytes:
-            return json.dumps(payload).encode("utf-8")
+        def __enter__(self): return self
+        def __exit__(self, exc_type, exc, tb): return None
+        def read(self) -> bytes: return json.dumps(payload).encode()
 
     monkeypatch.setattr(validate_connector, "urlopen", lambda *args, **kwargs: Response())
-
     with pytest.raises(SystemExit, match="Connector tasks unhealthy"):
         validate_connector.main()
 
 
-def test_bronze_from_kafka_main_reads_cdc_topic(monkeypatch: pytest.MonkeyPatch) -> None:
-    module, spark, builder = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.bronze_from_kafka")
+# ---------------------------------------------------------------------------
+# bronze job
+# ---------------------------------------------------------------------------
 
+def test_bronze_from_kafka_streams_to_iceberg(monkeypatch: pytest.MonkeyPatch) -> None:
+    module, spark, builder = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.bronze_from_kafka")
     module.main()
 
     assert builder.app_name == "bronze-from-kafka"
-    assert spark.read.format_name == "kafka"
-    assert ("subscribe", "cdc.public.payments") in spark.read.options
-    assert spark.frame.write.parquet_path == "hdfs://namenode:9000/data/bronze/payments_cdc"
+    assert any(k == "spark.sql.catalog.iceberg.type" for k, _ in builder.config_values)
+    assert spark.readStream.format_value == "kafka"
+    assert spark.readStream.options.get("subscribe") == module.KAFKA_TOPIC
+    assert spark.readStream._frame.writeStream.trigger_kwargs == {"availableNow": True}
+    assert spark.readStream._frame.writeStream.options.get("checkpointLocation") == module.CHECKPOINT_PATH
+    assert spark.readStream._frame.writeStream.to_table_name == module.BRONZE_TABLE
     assert spark.stopped is True
 
 
-def test_silver_payments_main_writes_silver_dataset(monkeypatch: pytest.MonkeyPatch) -> None:
-    module, spark, builder = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.silver_payments")
+# ---------------------------------------------------------------------------
+# silver job
+# ---------------------------------------------------------------------------
 
+def test_silver_payments_streams_from_bronze(monkeypatch: pytest.MonkeyPatch) -> None:
+    module, spark, builder = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.silver_payments")
     module.main()
 
     assert builder.app_name == "silver-payments"
-    assert spark.read.parquet_path == module.BRONZE_PATH
-    assert ("filter", "applied") in spark.frame.operations
-    assert any(operation == ("drop", ("row_number",)) for operation in spark.frame.operations)
-    assert sum(1 for operation in spark.frame.operations if operation == ("filter", "applied")) == 2
-    assert spark.frame.write.parquet_path == module.SILVER_PATH
+    assert any(k == "spark.sql.catalog.iceberg.type" for k, _ in builder.config_values)
+    assert spark.readStream.format_value == "iceberg"
+    assert spark.readStream.load_path == module.BRONZE_TABLE
+    assert spark.readStream._frame.writeStream.trigger_kwargs == {"availableNow": True}
+    assert spark.readStream._frame.writeStream.options.get("checkpointLocation") == module.CHECKPOINT_PATH
     assert spark.stopped is True
 
 
-def test_gold_metrics_main_writes_gold_dataset(monkeypatch: pytest.MonkeyPatch) -> None:
-    module, spark, builder = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.gold_metrics")
+def test_silver_upsert_fn_merges_upserts(monkeypatch: pytest.MonkeyPatch) -> None:
+    module, spark, builder = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.silver_payments")
 
+    module._upsert_to_silver(FakeFrame(), 0)
+
+    merge_calls = [c for c in spark.sql_calls if "MERGE INTO" in c]
+    assert len(merge_calls) >= 1
+    assert module.SILVER_TABLE in merge_calls[0]
+
+
+def test_silver_upsert_fn_deletes_on_d_op(monkeypatch: pytest.MonkeyPatch) -> None:
+    module, spark, builder = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.silver_payments")
+
+    module._upsert_to_silver(FakeFrame(), 0)
+
+    delete_calls = [c for c in spark.sql_calls if "DELETE FROM" in c]
+    assert len(delete_calls) >= 1
+    assert module.SILVER_TABLE in delete_calls[0]
+
+
+# ---------------------------------------------------------------------------
+# gold job
+# ---------------------------------------------------------------------------
+
+def test_gold_metrics_merges_into_iceberg(monkeypatch: pytest.MonkeyPatch) -> None:
+    module, spark, builder = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.gold_metrics")
     module.main()
 
     assert builder.app_name == "gold-metrics"
-    assert spark.read.parquet_path == module.SILVER_PATH
-    assert any(operation[0] == "groupBy" for operation in spark.frame.operations)
-    assert any(operation == ("agg", 3) for operation in spark.frame.operations)
-    assert spark.frame.write.parquet_path == module.GOLD_PATH
+    assert any(k == "spark.sql.catalog.iceberg.type" for k, _ in builder.config_values)
+    merge_calls = [c for c in spark.sql_calls if "MERGE INTO" in c]
+    assert len(merge_calls) >= 1
+    assert module.GOLD_TABLE in merge_calls[0]
+    assert module.SILVER_TABLE in merge_calls[0]
+    # auth_rate must use the silver canonicalised 'authorized' status
+    assert "'authorized'" in merge_calls[0]
     assert spark.stopped is True
 
+
+# ---------------------------------------------------------------------------
+# trino-exporter
+# ---------------------------------------------------------------------------
+
+def _load_exporter(monkeypatch: pytest.MonkeyPatch):
+    from prometheus_client import REGISTRY
+    for collector in list(REGISTRY._collector_to_names):
+        try:
+            REGISTRY.unregister(collector)
+        except (KeyError, ValueError):
+            pass
+    sys.modules.pop("exporter", None)
+    exporter_dir = Path(__file__).resolve().parents[1] / "config" / "trino-exporter"
+    monkeypatch.syspath_prepend(str(exporter_dir))
+    return importlib.import_module("exporter")
+
+
+class _FakeResponse:
+    def __init__(self, payload: object) -> None:
+        self._payload = payload
+
+    def json(self) -> object:
+        return self._payload
+
+
+def test_trino_exporter_collect_sets_coordinator_up_when_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    exporter = _load_exporter(monkeypatch)
+    monkeypatch.setattr(
+        exporter.requests, "get",
+        lambda url, **kw: _FakeResponse({"state": "ACTIVE"}) if url.endswith("/v1/info") else _FakeResponse([]),
+    )
+    exporter.collect()
+    assert exporter.coordinator_up._value.get() == 1
+
+
+def test_trino_exporter_collect_sets_coordinator_down_when_info_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    exporter = _load_exporter(monkeypatch)
+
+    def failing_get(url, **kw):
+        if url.endswith("/v1/info"):
+            raise RuntimeError("boom")
+        return _FakeResponse([])
+
+    monkeypatch.setattr(exporter.requests, "get", failing_get)
+    exporter.collect()
+    assert exporter.coordinator_up._value.get() == 0
+
+
+def test_trino_exporter_collect_counts_query_states(monkeypatch: pytest.MonkeyPatch) -> None:
+    exporter = _load_exporter(monkeypatch)
+    queries = [
+        {"state": "RUNNING"}, {"state": "RUNNING"},
+        {"state": "QUEUED"},
+        {"state": "FINISHED"}, {"state": "FINISHED"}, {"state": "FINISHED"},
+        {"state": "FAILED"},
+    ]
+    monkeypatch.setattr(
+        exporter.requests, "get",
+        lambda url, **kw: _FakeResponse({"state": "ACTIVE"}) if url.endswith("/v1/info") else _FakeResponse(queries),
+    )
+    exporter.collect()
+    assert exporter.running_queries._value.get() == 2
+    assert exporter.queued_queries._value.get() == 1
+    assert exporter.blocked_queries._value.get() == 0
+    assert exporter.finished_queries._value.get() == 3
+    assert exporter.failed_queries._value.get() == 1
+
+
+def test_trino_exporter_collect_swallows_query_endpoint_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    exporter = _load_exporter(monkeypatch)
+    exporter.running_queries.set(99)
+
+    def failing_get(url, **kw):
+        if url.endswith("/v1/info"):
+            return _FakeResponse({"state": "ACTIVE"})
+        raise RuntimeError("query endpoint down")
+
+    monkeypatch.setattr(exporter.requests, "get", failing_get)
+    exporter.collect()  # must not raise
+    # query gauges are left untouched (last-known value preserved)
+    assert exporter.running_queries._value.get() == 99
+
+
+# ---------------------------------------------------------------------------
+# DAG shape
+# ---------------------------------------------------------------------------
 
 def test_payments_pipeline_dag_has_expected_shape() -> None:
     class FakeDAG:
         def __init__(self, *args, **kwargs) -> None:
             self.schedule_interval = kwargs.get("schedule")
             self.max_active_runs = kwargs.get("max_active_runs")
-            self.tasks: dict[str, FakeBashOperator] = {}
+            self.tasks: dict[str, "FakeBashOperator"] = {}
 
         def __enter__(self) -> "FakeDAG":
             FakeBashOperator.current_dag = self
@@ -441,13 +646,8 @@ def test_payments_pipeline_dag_has_expected_shape() -> None:
     assert dag.schedule_interval is None
     assert dag.max_active_runs == 1
     assert dag.task_ids == {
-        "init_hdfs",
-        "validate_connector",
-        "bronze_load",
-        "silver_transform",
-        "gold_transform",
-        "publish_trino_tables",
-        "validate_trino",
+        "init_hdfs", "validate_connector", "bronze_load",
+        "silver_transform", "gold_transform", "publish_trino_tables", "validate_trino",
     }
     assert dag.get_task("init_hdfs").downstream_task_ids == {"validate_connector"}
     assert dag.get_task("validate_connector").downstream_task_ids == {"bronze_load"}
