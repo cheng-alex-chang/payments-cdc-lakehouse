@@ -13,7 +13,7 @@
     "table.include.list": "public.merchants,public.payments,public.refunds",
     "slot.name": "payments_cdc_slot",
     "publication.autocreate.mode": "filtered",
-    "decimal.handling.mode": "double",
+    "decimal.handling.mode": "string",
     "key.converter": "org.apache.kafka.connect.json.JsonConverter",
     "value.converter": "org.apache.kafka.connect.json.JsonConverter",
     "value.converter.schemas.enable": "false",

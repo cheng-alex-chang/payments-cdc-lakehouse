@@ -28,16 +28,16 @@ Postgres (OLTP)
 ### Silver
 - **Source:** Bronze Iceberg table (Iceberg streaming source)
 - **Pattern:** Streaming `foreachBatch` → `MERGE INTO` for inserts/updates, `DELETE FROM` for Debezium `op=d`
-- **Schema:** Canonical payment record — typed, normalised text fields, timestamps in microseconds converted to `TIMESTAMP`
+- **Schema:** Canonical payment record — typed, normalised text fields, exact-precision `DECIMAL(12,2)` amount, timestamps in microseconds converted to `TIMESTAMP`
 - **Partitioned by:** `days(created_at)`
 - **Guarantee:** Current state of each payment. Handles the full CDC contract: inserts, updates, and deletes.
 
 ### Gold
-- **Source:** Silver Iceberg table (batch read)
-- **Pattern:** SQL subquery aggregation → `MERGE INTO` gold
-- **Schema:** Hourly aggregates per `country_code` and `payment_method` — `payment_count`, `gross_volume`, `auth_rate`
+- **Source:** Bronze CDC events identify changed hours; silver provides the current-state rows for recomputation
+- **Pattern:** Streaming `foreachBatch` on bronze → recompute only affected hourly partitions in gold
+- **Schema:** Hourly aggregates per `country_code` and `payment_method` — `payment_count`, exact-precision `gross_volume`, `auth_rate`
 - **Partitioned by:** `days(payment_hour)`
-- **Guarantee:** Idempotent full recalculation on every run. Correct after any silver change including deletes.
+- **Guarantee:** Idempotent recomputation of only the hours touched by incoming CDC events. Correct after inserts, updates, and deletes.
 
 ## Why Iceberg
 
@@ -53,7 +53,7 @@ Plain Parquet with `mode("overwrite")` rewrites the entire dataset on every run 
 
 Bronze and silver use `trigger(availableNow=True)`. This is the "incremental batch" pattern: Spark reads all data accumulated since the last checkpoint, processes it, commits to Iceberg, and exits. The Airflow scheduler triggers each run on demand. No continuous streaming process is kept alive between runs.
 
-Gold reads the full current silver state and recalculates all hourly aggregates on every run. This is acceptable because the gold table is small (one row per hour × country × method) and a full recalculation is simpler and always correct, including after silver deletes.
+Gold uses the incoming CDC events to determine which `payment_hour` partitions changed. For each micro-batch it deletes the existing gold rows for those hours and recomputes them from the full current silver state. This avoids full-table rescans while staying correct after silver updates and deletes.
 
 ## CDC Delete Handling
 
@@ -61,10 +61,9 @@ Debezium sets `op=d` on delete events and populates `before` instead of `after`.
 
 ## Known Limitations
 
-- **Gold is a full recalculation.** For very large silver tables, recalculating only the affected `payment_hour` partitions would be more efficient. The current approach is correct and simple for the scale of this platform.
 - **Single Spark executor.** Jobs run on `local[*]` inside one container. Horizontal scaling would require a proper Spark cluster (YARN, Kubernetes) and external shuffle service.
 - **No schema evolution handling.** If the Postgres schema changes, Debezium will emit new fields but the silver `CREATE TABLE IF NOT EXISTS` will not add columns automatically. A schema migration step would be needed.
-- **Decimal precision.** Debezium is configured with `decimal.handling.mode=double`. For a production payments system this should be `string` or `precise` to avoid floating-point rounding on monetary amounts.
+- **Data quality scope.** Silver now fails fast on invalid IDs, negative amounts, malformed country/currency codes, unsupported methods/statuses, and timestamps that move backward. A production platform would typically extend this with reconciliation against source totals and external alerting.
 
 ## Orchestration
 

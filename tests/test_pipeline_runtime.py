@@ -8,6 +8,7 @@ import types
 from pathlib import Path
 
 import pytest
+from unittest.mock import MagicMock
 
 
 # ---------------------------------------------------------------------------
@@ -104,9 +105,15 @@ class FakeExpr:
     def over(self, _window: object) -> "FakeExpr": return self
     def otherwise(self, _value: object) -> "FakeExpr": return self
     def isNotNull(self) -> "FakeExpr": return self
+    def isNull(self) -> "FakeExpr": return self
     def isin(self, *args) -> "FakeExpr": return self
+    def rlike(self, _value: str) -> "FakeExpr": return self
     def __truediv__(self, _other: object) -> "FakeExpr": return self
+    def __lt__(self, _other: object) -> "FakeExpr": return self
+    def __gt__(self, _other: object) -> "FakeExpr": return self
     def __eq__(self, _other: object) -> "FakeExpr": return self  # type: ignore[override]
+    def __invert__(self) -> "FakeExpr": return self
+    def __and__(self, _other: object) -> "FakeExpr": return self
 
 
 class FakeWriter:
@@ -152,12 +159,19 @@ class FakeFrame:
         self.operations.append(("select", len(columns)))
         return self
 
+    def distinct(self) -> "FakeFrame":
+        self.operations.append(("distinct", True))
+        return self
+
     def groupBy(self, *columns: str) -> FakeGroupedFrame:
         self.operations.append(("groupBy", columns))
         return FakeGroupedFrame(self)
 
     def isEmpty(self) -> bool:
         return False
+
+    def count(self) -> int:
+        return 0
 
     def createOrReplaceTempView(self, name: str) -> None:
         pass
@@ -468,6 +482,7 @@ def test_silver_payments_streams_from_bronze(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_silver_upsert_fn_merges_upserts(monkeypatch: pytest.MonkeyPatch) -> None:
     module, spark, builder = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.silver_payments")
+    monkeypatch.setattr(module, "_validate_upserts", lambda upserts: None)
 
     module._upsert_to_silver(FakeFrame(), 0)
 
@@ -478,6 +493,7 @@ def test_silver_upsert_fn_merges_upserts(monkeypatch: pytest.MonkeyPatch) -> Non
 
 def test_silver_upsert_fn_deletes_on_d_op(monkeypatch: pytest.MonkeyPatch) -> None:
     module, spark, builder = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.silver_payments")
+    monkeypatch.setattr(module, "_validate_upserts", lambda upserts: None)
 
     module._upsert_to_silver(FakeFrame(), 0)
 
@@ -486,23 +502,84 @@ def test_silver_upsert_fn_deletes_on_d_op(monkeypatch: pytest.MonkeyPatch) -> No
     assert module.SILVER_TABLE in delete_calls[0]
 
 
+_CLEAN_QUALITY_METRICS = {
+    "null_payment_id": 0,
+    "null_merchant_id": 0,
+    "null_amount": 0,
+    "negative_amount": 0,
+    "null_currency": 0,
+    "invalid_currency": 0,
+    "null_payment_method": 0,
+    "invalid_payment_method": 0,
+    "null_payment_status": 0,
+    "invalid_payment_status": 0,
+    "null_country_code": 0,
+    "invalid_country_code": 0,
+    "null_created_at": 0,
+    "null_updated_at": 0,
+    "updated_before_created": 0,
+}
+
+
+def _make_dq_mock(metrics: dict, duplicate_count: int = 0) -> MagicMock:
+    mock_df = MagicMock()
+    mock_df.select.return_value.collect.return_value = [MagicMock(asDict=lambda: metrics)]
+    mock_df.groupBy.return_value.agg.return_value.filter.return_value.count.return_value = duplicate_count
+    return mock_df
+
+
+def test_validate_upserts_raises_on_null_payment_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    module, _, _ = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.silver_payments")
+
+    bad = {**_CLEAN_QUALITY_METRICS, "null_payment_id": 2}
+    with pytest.raises(ValueError, match="null_payment_id"):
+        module._validate_upserts(_make_dq_mock(bad))
+
+
+def test_validate_upserts_raises_on_duplicate_payment_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    module, _, _ = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.silver_payments")
+
+    with pytest.raises(ValueError, match="duplicate_payment_ids"):
+        module._validate_upserts(_make_dq_mock(_CLEAN_QUALITY_METRICS, duplicate_count=3))
+
+
+def test_validate_upserts_passes_on_clean_data(monkeypatch: pytest.MonkeyPatch) -> None:
+    module, _, _ = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.silver_payments")
+
+    module._validate_upserts(_make_dq_mock(_CLEAN_QUALITY_METRICS))  # must not raise
+
+
 # ---------------------------------------------------------------------------
 # gold job
 # ---------------------------------------------------------------------------
 
-def test_gold_metrics_merges_into_iceberg(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gold_metrics_recomputes_affected_partitions(monkeypatch: pytest.MonkeyPatch) -> None:
     module, spark, builder = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.gold_metrics")
     module.main()
 
     assert builder.app_name == "gold-metrics"
     assert any(k == "spark.sql.catalog.iceberg.type" for k, _ in builder.config_values)
-    merge_calls = [c for c in spark.sql_calls if "MERGE INTO" in c]
-    assert len(merge_calls) >= 1
-    assert module.GOLD_TABLE in merge_calls[0]
-    assert module.SILVER_TABLE in merge_calls[0]
-    # auth_rate must use the silver canonicalised 'authorized' status
-    assert "'authorized'" in merge_calls[0]
+    assert spark.readStream.format_value == "iceberg"
+    assert spark.readStream.load_path == module.BRONZE_TABLE
+    assert spark.readStream._frame.writeStream.trigger_kwargs == {"availableNow": True}
+    assert spark.readStream._frame.writeStream.options.get("checkpointLocation") == module.CHECKPOINT_PATH
+    assert spark.readStream._frame.writeStream.foreach_batch_fn == module._recompute_gold_partitions
     assert spark.stopped is True
+
+
+def test_gold_recompute_fn_refreshes_changed_hours(monkeypatch: pytest.MonkeyPatch) -> None:
+    module, spark, builder = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.gold_metrics")
+
+    module._recompute_gold_partitions(FakeFrame(), 0)
+
+    delete_calls = [c for c in spark.sql_calls if "DELETE FROM" in c]
+    insert_calls = [c for c in spark.sql_calls if "INSERT INTO" in c]
+    assert len(delete_calls) >= 1
+    assert module.GOLD_TABLE in delete_calls[0]
+    assert len(insert_calls) >= 1
+    assert module.GOLD_TABLE in insert_calls[0]
+    assert module.SILVER_TABLE in insert_calls[0]
+    assert "DECIMAL(18,2)" in insert_calls[0]
 
 
 # ---------------------------------------------------------------------------

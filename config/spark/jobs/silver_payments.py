@@ -4,12 +4,14 @@ import logging
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql.functions import (
+    count,
     col,
     current_timestamp,
     from_unixtime,
     get_json_object,
     lower,
     regexp_replace,
+    sum as spark_sum,
     trim,
     upper,
 )
@@ -19,20 +21,35 @@ BRONZE_TABLE    = "iceberg.analytics.payments_bronze"
 SILVER_TABLE    = "iceberg.analytics.payments_silver"
 CHECKPOINT_PATH = "hdfs://namenode:9000/checkpoints/silver"
 
+ALLOWED_PAYMENT_METHODS = (
+    "apple_pay",
+    "bank_transfer",
+    "card",
+    "google_pay",
+    "paypal",
+)
+
+ALLOWED_PAYMENT_STATUSES = (
+    "authorized",
+    "cancelled",
+    "chargeback",
+    "failed",
+    "pending",
+    "refunded",
+)
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
 LOGGER = logging.getLogger(__name__)
 
 
-def _upsert_to_silver(batch_df: DataFrame, batch_id: int) -> None:
-    spark = batch_df.sparkSession
-
-    upserts = (
+def _build_upserts(batch_df: DataFrame) -> DataFrame:
+    return (
         batch_df
         .filter(get_json_object(col("kafka_value"), "$.op").isin("c", "u", "r"))
         .select(
             get_json_object(col("kafka_value"), "$.after.payment_id").cast("long").alias("payment_id"),
             get_json_object(col("kafka_value"), "$.after.merchant_id").cast("long").alias("merchant_id"),
-            get_json_object(col("kafka_value"), "$.after.amount").cast("double").alias("amount"),
+            get_json_object(col("kafka_value"), "$.after.amount").cast("decimal(12,2)").alias("amount"),
             upper(trim(get_json_object(col("kafka_value"), "$.after.currency"))).alias("currency"),
             regexp_replace(lower(trim(get_json_object(col("kafka_value"), "$.after.payment_method"))), r"\s+", "_").alias("payment_method"),
             regexp_replace(lower(trim(get_json_object(col("kafka_value"), "$.after.payment_status"))), r"\s+", "_").alias("payment_status"),
@@ -41,10 +58,56 @@ def _upsert_to_silver(batch_df: DataFrame, batch_id: int) -> None:
             from_unixtime(get_json_object(col("kafka_value"), "$.after.updated_at").cast("double") / 1_000_000).cast("timestamp").alias("updated_at"),
             current_timestamp().alias("ingested_at"),
         )
-        .filter(col("payment_id").isNotNull())
     )
 
+
+def _validate_upserts(upserts: DataFrame) -> None:
+    quality_metrics = (
+        upserts
+        .select(
+            spark_sum(col("payment_id").isNull().cast("int")).alias("null_payment_id"),
+            spark_sum(col("merchant_id").isNull().cast("int")).alias("null_merchant_id"),
+            spark_sum(col("amount").isNull().cast("int")).alias("null_amount"),
+            spark_sum((col("amount") < 0).cast("int")).alias("negative_amount"),
+            spark_sum(col("currency").isNull().cast("int")).alias("null_currency"),
+            spark_sum((~col("currency").rlike("^[A-Z]{3}$")).cast("int")).alias("invalid_currency"),
+            spark_sum(col("payment_method").isNull().cast("int")).alias("null_payment_method"),
+            spark_sum((~col("payment_method").isin(*ALLOWED_PAYMENT_METHODS)).cast("int")).alias("invalid_payment_method"),
+            spark_sum(col("payment_status").isNull().cast("int")).alias("null_payment_status"),
+            spark_sum((~col("payment_status").isin(*ALLOWED_PAYMENT_STATUSES)).cast("int")).alias("invalid_payment_status"),
+            spark_sum(col("country_code").isNull().cast("int")).alias("null_country_code"),
+            spark_sum((~col("country_code").rlike("^[A-Z]{2}$")).cast("int")).alias("invalid_country_code"),
+            spark_sum(col("created_at").isNull().cast("int")).alias("null_created_at"),
+            spark_sum(col("updated_at").isNull().cast("int")).alias("null_updated_at"),
+            spark_sum((col("updated_at") < col("created_at")).cast("int")).alias("updated_before_created"),
+        )
+        .collect()[0]
+        .asDict()
+    )
+
+    duplicate_payment_ids = (
+        upserts
+        .groupBy("payment_id")
+        .agg(count("*").alias("row_count"))
+        .filter((col("payment_id").isNotNull()) & (col("row_count") > 1))
+        .count()
+    )
+
+    failures = {name: value for name, value in quality_metrics.items() if value}
+    if duplicate_payment_ids:
+        failures["duplicate_payment_ids"] = duplicate_payment_ids
+
+    if failures:
+        raise ValueError(f"Silver data quality checks failed: {failures}")
+
+
+def _upsert_to_silver(batch_df: DataFrame, batch_id: int) -> None:
+    spark = batch_df.sparkSession
+
+    upserts = _build_upserts(batch_df)
+
     if not upserts.isEmpty():
+        _validate_upserts(upserts)
         upserts.createOrReplaceTempView("_silver_upserts")
         spark.sql(f"""
             MERGE INTO {SILVER_TABLE} t
@@ -86,7 +149,7 @@ def main() -> None:
         CREATE TABLE IF NOT EXISTS {SILVER_TABLE} (
             payment_id     BIGINT,
             merchant_id    BIGINT,
-            amount         DOUBLE,
+            amount         DECIMAL(12,2),
             currency       STRING,
             payment_method STRING,
             payment_status STRING,
