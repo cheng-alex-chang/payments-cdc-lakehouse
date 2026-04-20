@@ -189,3 +189,23 @@ Grafana now provisions a `Payments Demo Overview` dashboard backed by the source
 - payment method mix
 - gross volume by country
 - refunds over time
+
+## Project Tour
+
+This project is easiest to understand when viewed from three angles:
+
+- orchestration in Airflow
+- CDC and analytics results in Kafka and Trino
+- business-facing metrics in Grafana
+
+Airflow shows the pipeline running from source validation through bronze, silver, gold, and downstream validation.
+
+![Airflow DAG showing the payments CDC pipeline run](docs/images/airflow-payments-pipeline.png)
+
+Grafana shows the seeded demo data as business-facing metrics, including volume, authorization rate, refunds, and payment method mix.
+
+![Grafana dashboard showing payment volume, authorization rate, refunds, and payment mix](docs/images/grafana-payments-demo-overview.png)
+
+Trino shows the materialized gold layer directly, making it easy to inspect the hourly aggregates produced by the pipeline.
+
+![Trino query results for the payment_metrics_gold Iceberg table](docs/images/trino-gold-metrics-query.png)
