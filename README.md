@@ -8,8 +8,8 @@ with:
 
 - `Airflow` for orchestration
 - `Hive Metastore` as the Iceberg catalog
-- `Metabase` for dashboards
-- `Prometheus + Grafana` for monitoring
+- `Metabase` for ad hoc dashboards
+- `Prometheus + Grafana` for platform monitoring and a seeded payments demo dashboard
 - `pytest` for tests
 
 See [docs/design.md](docs/design.md) for layer contracts, incremental processing, CDC delete handling, and known limitations.
@@ -91,6 +91,16 @@ bash scripts/register_connector.sh
 - Prometheus: `http://localhost:9090`
 - Grafana: `http://localhost:3001`
 
+### Load richer demo data
+
+Fresh environments get the expanded demo seed automatically. If your containers and volumes already exist, reload the sample dataset into Postgres with:
+
+```bash
+python3 scripts/load_demo_data.py
+```
+
+Then trigger the Airflow DAG again so bronze, silver, and gold pick up the new CDC events.
+
 ### Run tests
 
 ```bash
@@ -166,3 +176,16 @@ docker exec dp-trino trino --execute "SELECT payment_id, amount, payment_method,
 ```bash
 docker exec dp-trino trino --execute "SELECT * FROM iceberg.analytics.payment_metrics_gold ORDER BY payment_hour, country_code, payment_method"
 ```
+
+## Visualization
+
+Grafana now provisions a `Payments Demo Overview` dashboard backed by the source Postgres database. Open `http://localhost:3001`, go to the `Data Platform` folder, and you should see charts for:
+
+- total payments
+- gross volume
+- authorization rate
+- refund events
+- hourly volume trend
+- payment method mix
+- gross volume by country
+- refunds over time
