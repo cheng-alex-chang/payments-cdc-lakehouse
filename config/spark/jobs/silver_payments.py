@@ -9,6 +9,7 @@ from pyspark.sql.functions import (
     current_timestamp,
     from_unixtime,
     get_json_object,
+    lit,
     lower,
     regexp_replace,
     sum as spark_sum,
@@ -19,6 +20,7 @@ from pyspark.sql.functions import (
 
 BRONZE_TABLE    = "iceberg.analytics.payments_bronze"
 SILVER_TABLE    = "iceberg.analytics.payments_silver"
+DLQ_TABLE       = "iceberg.analytics.payments_silver_dlq"
 CHECKPOINT_PATH = "hdfs://namenode:9000/checkpoints/silver"
 
 ALLOWED_PAYMENT_METHODS = (
@@ -40,6 +42,21 @@ ALLOWED_PAYMENT_STATUSES = (
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
 LOGGER = logging.getLogger(__name__)
+
+
+def _write_to_dlq(records: DataFrame, batch_id: int, reason: str) -> None:
+    (
+        records
+        .select(
+            col("kafka_value"),
+            lit(batch_id).cast("long").alias("batch_id"),
+            lit(reason).alias("error_reason"),
+            current_timestamp().alias("ingested_at"),
+        )
+        .writeTo(DLQ_TABLE)
+        .append()
+    )
+    LOGGER.warning("DLQ batch=%s reason=%s count=%s", batch_id, reason, records.count())
 
 
 def _build_upserts(batch_df: DataFrame) -> DataFrame:
@@ -104,8 +121,19 @@ def _validate_upserts(upserts: DataFrame) -> None:
 def _upsert_to_silver(batch_df: DataFrame, batch_id: int) -> None:
     spark = batch_df.sparkSession
 
-    upserts = _build_upserts(batch_df)
+    op_col = get_json_object(col("kafka_value"), "$.op")
+    malformed = batch_df.filter(op_col.isNull())
+    if not malformed.isEmpty():
+        _write_to_dlq(malformed, batch_id, "null_op")
 
+    known_ops = batch_df.filter(op_col.isNotNull())
+    unexpected = known_ops.filter(~op_col.isin("c", "u", "r", "d"))
+    if not unexpected.isEmpty():
+        _write_to_dlq(unexpected, batch_id, "unexpected_op")
+
+    processable = known_ops.filter(op_col.isin("c", "u", "r", "d"))
+
+    upserts = _build_upserts(processable)
     if not upserts.isEmpty():
         _validate_upserts(upserts)
         upserts.createOrReplaceTempView("_silver_upserts")
@@ -117,8 +145,8 @@ def _upsert_to_silver(batch_df: DataFrame, batch_id: int) -> None:
         """)
 
     deletes = (
-        batch_df
-        .filter(get_json_object(col("kafka_value"), "$.op") == "d")
+        processable
+        .filter(op_col == "d")
         .select(get_json_object(col("kafka_value"), "$.before.payment_id").cast("long").alias("payment_id"))
         .filter(col("payment_id").isNotNull())
     )
@@ -144,6 +172,17 @@ def main() -> None:
         .config("spark.sql.catalog.iceberg.warehouse","hdfs://namenode:9000/warehouse")
         .getOrCreate()
     )
+
+    spark.sql(f"""
+        CREATE TABLE IF NOT EXISTS {DLQ_TABLE} (
+            kafka_value  STRING,
+            batch_id     BIGINT,
+            error_reason STRING,
+            ingested_at  TIMESTAMP
+        )
+        USING iceberg
+        PARTITIONED BY (days(ingested_at))
+    """)
 
     spark.sql(f"""
         CREATE TABLE IF NOT EXISTS {SILVER_TABLE} (

@@ -6,7 +6,6 @@
     "database.hostname": "postgres",
     "database.port": "5432",
     "database.user": "dataeng",
-    "database.password": "dataeng",
     "database.dbname": "payments",
     "database.server.name": "payments",
     "topic.prefix": "cdc",

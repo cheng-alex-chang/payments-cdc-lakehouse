@@ -129,6 +129,11 @@ class FakeWriter:
         self.parquet_path = path
 
 
+class FakeDataFrameWriterV2:
+    def append(self) -> None:
+        pass
+
+
 class FakeGroupedFrame:
     def __init__(self, frame: "FakeFrame") -> None:
         self.frame = frame
@@ -172,6 +177,9 @@ class FakeFrame:
 
     def count(self) -> int:
         return 0
+
+    def writeTo(self, _table: str) -> FakeDataFrameWriterV2:
+        return FakeDataFrameWriterV2()
 
     def createOrReplaceTempView(self, name: str) -> None:
         pass
@@ -259,7 +267,7 @@ def load_module_with_fake_pyspark(monkeypatch: pytest.MonkeyPatch, module_name: 
     functions_module = types.ModuleType("pyspark.sql.functions")
     for name in [
         "avg", "col", "count", "current_timestamp", "date_trunc",
-        "from_unixtime", "get_json_object", "input_file_name", "lower",
+        "from_unixtime", "get_json_object", "input_file_name", "lit", "lower",
         "regexp_replace", "sum", "trim", "upper", "when",
     ]:
         setattr(functions_module, name, lambda *args, name=name, **kwargs: FakeExpr(name))
@@ -483,6 +491,7 @@ def test_silver_payments_streams_from_bronze(monkeypatch: pytest.MonkeyPatch) ->
 def test_silver_upsert_fn_merges_upserts(monkeypatch: pytest.MonkeyPatch) -> None:
     module, spark, builder = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.silver_payments")
     monkeypatch.setattr(module, "_validate_upserts", lambda upserts: None)
+    monkeypatch.setattr(module, "_write_to_dlq", lambda *_: None)
 
     module._upsert_to_silver(FakeFrame(), 0)
 
@@ -494,12 +503,39 @@ def test_silver_upsert_fn_merges_upserts(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_silver_upsert_fn_deletes_on_d_op(monkeypatch: pytest.MonkeyPatch) -> None:
     module, spark, builder = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.silver_payments")
     monkeypatch.setattr(module, "_validate_upserts", lambda upserts: None)
+    monkeypatch.setattr(module, "_write_to_dlq", lambda *_: None)
 
     module._upsert_to_silver(FakeFrame(), 0)
 
     delete_calls = [c for c in spark.sql_calls if "DELETE FROM" in c]
     assert len(delete_calls) >= 1
     assert module.SILVER_TABLE in delete_calls[0]
+
+
+def test_silver_upsert_routes_malformed_to_dlq(monkeypatch: pytest.MonkeyPatch) -> None:
+    module, spark, builder = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.silver_payments")
+    monkeypatch.setattr(module, "_validate_upserts", lambda upserts: None)
+
+    dlq_calls: list[tuple] = []
+    monkeypatch.setattr(module, "_write_to_dlq", lambda records, batch_id, reason: dlq_calls.append((batch_id, reason)))
+
+    module._upsert_to_silver(FakeFrame(), 42)
+
+    reasons = [reason for _, reason in dlq_calls]
+    assert "null_op" in reasons
+
+
+def test_silver_upsert_routes_unexpected_op_to_dlq(monkeypatch: pytest.MonkeyPatch) -> None:
+    module, spark, builder = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.silver_payments")
+    monkeypatch.setattr(module, "_validate_upserts", lambda upserts: None)
+
+    dlq_calls: list[tuple] = []
+    monkeypatch.setattr(module, "_write_to_dlq", lambda records, batch_id, reason: dlq_calls.append((batch_id, reason)))
+
+    module._upsert_to_silver(FakeFrame(), 7)
+
+    reasons = [reason for _, reason in dlq_calls]
+    assert "unexpected_op" in reasons
 
 
 _CLEAN_QUALITY_METRICS = {

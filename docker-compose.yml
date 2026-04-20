@@ -3,16 +3,16 @@ services:
     image: postgres:15
     container_name: dp-postgres
     environment:
-      POSTGRES_DB: payments
-      POSTGRES_USER: dataeng
-      POSTGRES_PASSWORD: dataeng
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./config/postgres/init:/docker-entrypoint-initdb.d
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U dataeng -d payments"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -114,15 +114,15 @@ services:
     image: postgres:15
     container_name: dp-metastore-db
     environment:
-      POSTGRES_DB: metastore
-      POSTGRES_USER: hive
-      POSTGRES_PASSWORD: hive
+      POSTGRES_DB: ${METASTORE_DB}
+      POSTGRES_USER: ${METASTORE_USER}
+      POSTGRES_PASSWORD: ${METASTORE_PASSWORD}
     ports:
       - "5433:5432"
     volumes:
       - metastore_db_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U hive -d metastore"]
+      test: ["CMD-SHELL", "pg_isready -U ${METASTORE_USER} -d ${METASTORE_DB}"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -143,8 +143,8 @@ services:
       SERVICE_OPTS: >-
         -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://metastore-db:5432/metastore
         -Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver
-        -Djavax.jdo.option.ConnectionUserName=hive
-        -Djavax.jdo.option.ConnectionPassword=hive
+        -Djavax.jdo.option.ConnectionUserName=${METASTORE_USER}
+        -Djavax.jdo.option.ConnectionPassword=${METASTORE_PASSWORD}
     volumes:
       - ./config/hive-metastore/hive-site.xml:/opt/hive/conf/hive-site.xml
       - ./config/hadoop/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml
@@ -235,11 +235,11 @@ services:
     image: postgres:15
     container_name: dp-airflow-postgres
     environment:
-      POSTGRES_DB: airflow
-      POSTGRES_USER: airflow
-      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: ${AIRFLOW_DB}
+      POSTGRES_USER: ${AIRFLOW_USER}
+      POSTGRES_PASSWORD: ${AIRFLOW_PASSWORD}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      test: ["CMD-SHELL", "pg_isready -U ${AIRFLOW_USER} -d ${AIRFLOW_DB}"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -256,10 +256,10 @@ services:
     entrypoint: /bin/bash
     command:
       - -c
-      - airflow db migrate && airflow users create --username admin --password admin --firstname Data --lastname Engineer --role Admin --email admin@example.com
+      - airflow db migrate && airflow users create --username ${AIRFLOW_ADMIN_USERNAME} --password ${AIRFLOW_ADMIN_PASSWORD} --firstname Data --lastname Engineer --role Admin --email admin@example.com
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_USER}:${AIRFLOW_PASSWORD}@airflow-postgres/${AIRFLOW_DB}
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     volumes:
       - ./airflow/dags:/opt/airflow/dags
@@ -284,10 +284,10 @@ services:
       - "8088:8080"
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_USER}:${AIRFLOW_PASSWORD}@airflow-postgres/${AIRFLOW_DB}
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
-      AIRFLOW_CONN_SOURCE_POSTGRES: postgresql://dataeng:dataeng@postgres:5432/payments
+      AIRFLOW_CONN_SOURCE_POSTGRES: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       AIRFLOW__METRICS__STATSD_ON: "true"
       AIRFLOW__METRICS__STATSD_HOST: statsd-exporter
       AIRFLOW__METRICS__STATSD_PORT: "9125"
@@ -313,9 +313,9 @@ services:
     command: scheduler
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_USER}:${AIRFLOW_PASSWORD}@airflow-postgres/${AIRFLOW_DB}
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-      AIRFLOW_CONN_SOURCE_POSTGRES: postgresql://dataeng:dataeng@postgres:5432/payments
+      AIRFLOW_CONN_SOURCE_POSTGRES: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       AIRFLOW__METRICS__STATSD_ON: "true"
       AIRFLOW__METRICS__STATSD_HOST: statsd-exporter
       AIRFLOW__METRICS__STATSD_PORT: "9125"
