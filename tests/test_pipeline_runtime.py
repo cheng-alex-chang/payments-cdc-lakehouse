@@ -759,11 +759,12 @@ def test_payments_pipeline_dag_has_expected_shape() -> None:
     assert dag.schedule_interval is None
     assert dag.max_active_runs == 1
     assert dag.task_ids == {
-        "init_hdfs", "validate_connector", "bronze_load",
+        "init_hdfs", "validate_connector", "validate_schema", "bronze_load",
         "silver_transform", "gold_transform", "publish_trino_tables", "validate_trino",
     }
     assert dag.get_task("init_hdfs").downstream_task_ids == {"validate_connector"}
-    assert dag.get_task("validate_connector").downstream_task_ids == {"bronze_load"}
+    assert dag.get_task("validate_connector").downstream_task_ids == {"validate_schema"}
+    assert dag.get_task("validate_schema").downstream_task_ids == {"bronze_load"}
     assert dag.get_task("bronze_load").downstream_task_ids == {"silver_transform"}
     assert dag.get_task("silver_transform").downstream_task_ids == {"gold_transform"}
     assert dag.get_task("gold_transform").downstream_task_ids == {"publish_trino_tables"}

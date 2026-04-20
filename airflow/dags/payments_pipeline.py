@@ -36,6 +36,11 @@ with DAG(
         bash_command="python /opt/airflow/scripts/validate_connector.py",
     )
 
+    validate_schema = BashOperator(
+        task_id="validate_schema",
+        bash_command="python /opt/airflow/scripts/validate_schema.py",
+    )
+
     bronze_load = BashOperator(
         task_id="bronze_load",
         bash_command="python /opt/airflow/scripts/run_local_job.py bronze",
@@ -61,4 +66,4 @@ with DAG(
         bash_command="python /opt/airflow/scripts/validate_trino.py",
     )
 
-    init_hdfs >> validate_connector >> bronze_load >> silver_transform >> gold_transform >> publish_trino_tables >> validate_trino
+    init_hdfs >> validate_connector >> validate_schema >> bronze_load >> silver_transform >> gold_transform >> publish_trino_tables >> validate_trino
