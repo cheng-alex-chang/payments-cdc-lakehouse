@@ -34,11 +34,13 @@ with DAG(
     validate_connector = BashOperator(
         task_id="validate_connector",
         bash_command="python /opt/airflow/scripts/validate_connector.py",
+        retries=0,
     )
 
     validate_schema = BashOperator(
         task_id="validate_schema",
         bash_command="python /opt/airflow/scripts/validate_schema.py",
+        retries=0,
     )
 
     bronze_load = BashOperator(

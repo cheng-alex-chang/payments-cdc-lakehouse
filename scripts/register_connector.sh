@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+: "${POSTGRES_USER:?POSTGRES_USER must be set}"
 : "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}"
 
 python3 - <<'PY'
@@ -12,6 +13,7 @@ import urllib.request
 with open("config/connect/postgres-cdc.json", "r", encoding="utf-8") as handle:
     payload = json.load(handle)
 
+payload["config"]["database.user"]     = os.environ["POSTGRES_USER"]
 payload["config"]["database.password"] = os.environ["POSTGRES_PASSWORD"]
 
 name = payload["name"]

@@ -56,7 +56,7 @@ def _write_to_dlq(records: DataFrame, batch_id: int, reason: str) -> None:
         .writeTo(DLQ_TABLE)
         .append()
     )
-    LOGGER.warning("DLQ batch=%s reason=%s count=%s", batch_id, reason, records.count())
+    LOGGER.warning("DLQ batch=%s reason=%s", batch_id, reason)
 
 
 def _build_upserts(batch_df: DataFrame) -> DataFrame:

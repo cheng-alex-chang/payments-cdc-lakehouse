@@ -7,8 +7,9 @@ import sys
 import types
 from pathlib import Path
 
-import pytest
 from unittest.mock import MagicMock
+
+import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -729,7 +730,7 @@ def test_payments_pipeline_dag_has_expected_shape() -> None:
     class FakeBashOperator:
         current_dag: FakeDAG | None = None
 
-        def __init__(self, task_id: str, bash_command: str) -> None:
+        def __init__(self, task_id: str, bash_command: str, **kwargs: object) -> None:
             self.task_id = task_id
             self.bash_command = bash_command
             self.downstream_task_ids: set[str] = set()
