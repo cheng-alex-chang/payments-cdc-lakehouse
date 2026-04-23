@@ -31,9 +31,11 @@ Postgres
 `Bronze`
 - Raw Kafka envelope written to Iceberg, append-only
 - Streaming with `trigger(availableNow=True)` and HDFS checkpoint
+- PII fields (`shopper_id`) hashed with SHA-256 before the write so PII never lands in the lakehouse
 
 `Silver`
 - Canonical payment records, typed and normalised
+- Dedup by `payment_id` (latest `updated_at`, tiebroken by `kafka_offset`) before MERGE so reruns and full Kafka replays converge to the same current state
 - `foreachBatch` issues `MERGE INTO` for upserts (`op` in c, u, r) and `DELETE FROM` for Debezium deletes (`op=d`)
 
 `Gold`
@@ -74,6 +76,8 @@ tests/                         Unit tests
 ```bash
 docker compose up -d
 ```
+
+All long-running services use `restart: unless-stopped` and expose healthchecks (Kafka, Zookeeper, NameNode, DataNode, Trino, Airflow, Postgres variants). Dependent services wait on `condition: service_healthy` before starting, so the stack self-recovers from individual container crashes without manual intervention.
 
 ### Register or refresh the Debezium connector
 

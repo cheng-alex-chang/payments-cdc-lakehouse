@@ -68,6 +68,9 @@ class FakeStreamFrame:
     def filter(self, *args) -> "FakeStreamFrame":
         return self
 
+    def withColumn(self, *args) -> "FakeStreamFrame":
+        return self
+
     def __getattr__(self, name: str) -> "FakeStreamFrame":
         return self
 
@@ -273,6 +276,10 @@ def load_module_with_fake_pyspark(monkeypatch: pytest.MonkeyPatch, module_name: 
     ]:
         setattr(functions_module, name, lambda *args, name=name, **kwargs: FakeExpr(name))
     functions_module.row_number = lambda: FakeExpr("row_number")
+    functions_module.udf = lambda fn, returnType=None: (lambda *args, **kwargs: FakeExpr("udf"))
+
+    types_module = types.ModuleType("pyspark.sql.types")
+    types_module.StringType = type("StringType", (), {})
 
     window_module = types.ModuleType("pyspark.sql.window")
     window_module.Window = type(
@@ -283,6 +290,7 @@ def load_module_with_fake_pyspark(monkeypatch: pytest.MonkeyPatch, module_name: 
     monkeypatch.setitem(sys.modules, "pyspark", types.ModuleType("pyspark"))
     monkeypatch.setitem(sys.modules, "pyspark.sql", sql_module)
     monkeypatch.setitem(sys.modules, "pyspark.sql.functions", functions_module)
+    monkeypatch.setitem(sys.modules, "pyspark.sql.types", types_module)
     monkeypatch.setitem(sys.modules, "pyspark.sql.window", window_module)
     sys.modules.pop(module_name, None)
     module = importlib.import_module(module_name)
@@ -458,6 +466,54 @@ def test_validate_connector_rejects_failed_tasks(monkeypatch: pytest.MonkeyPatch
 # bronze job
 # ---------------------------------------------------------------------------
 
+def test_mask_pii_fields_hashes_shopper_id_in_after(monkeypatch: pytest.MonkeyPatch) -> None:
+    module, _, _ = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.bronze_from_kafka")
+    payload = json.dumps({"after": {"payment_id": "p1", "shopper_id": "user-123"}, "op": "c"})
+    result = json.loads(module._mask_pii_fields(payload))
+    assert result["after"]["shopper_id"] != "user-123"
+    assert len(result["after"]["shopper_id"]) == 64  # SHA-256 hex digest
+    assert result["after"]["payment_id"] == "p1"
+
+
+def test_mask_pii_fields_hashes_shopper_id_in_before(monkeypatch: pytest.MonkeyPatch) -> None:
+    module, _, _ = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.bronze_from_kafka")
+    payload = json.dumps({"before": {"payment_id": "p1", "shopper_id": "user-123"}, "after": None, "op": "d"})
+    result = json.loads(module._mask_pii_fields(payload))
+    assert result["before"]["shopper_id"] != "user-123"
+    assert len(result["before"]["shopper_id"]) == 64
+
+
+def test_mask_pii_fields_is_deterministic(monkeypatch: pytest.MonkeyPatch) -> None:
+    module, _, _ = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.bronze_from_kafka")
+    payload = json.dumps({"after": {"shopper_id": "user-123"}, "op": "c"})
+    first = json.loads(module._mask_pii_fields(payload))["after"]["shopper_id"]
+    second = json.loads(module._mask_pii_fields(payload))["after"]["shopper_id"]
+    assert first == second
+
+
+def test_mask_pii_fields_returns_none_for_null_input(monkeypatch: pytest.MonkeyPatch) -> None:
+    module, _, _ = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.bronze_from_kafka")
+    assert module._mask_pii_fields(None) is None
+
+
+def test_mask_pii_fields_passes_through_malformed_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    module, _, _ = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.bronze_from_kafka")
+    bad = "not-json"
+    assert module._mask_pii_fields(bad) == bad
+
+
+def test_mask_pii_fields_skips_envelope_without_pii(monkeypatch: pytest.MonkeyPatch) -> None:
+    module, _, _ = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.bronze_from_kafka")
+    payload = json.dumps({"after": {"payment_id": "p1", "amount": "99.00"}, "op": "c"})
+    result = json.loads(module._mask_pii_fields(payload))
+    assert result["after"] == {"payment_id": "p1", "amount": "99.00"}
+
+
+# ---------------------------------------------------------------------------
+# bronze job
+# ---------------------------------------------------------------------------
+
+
 def test_bronze_from_kafka_streams_to_iceberg(monkeypatch: pytest.MonkeyPatch) -> None:
     module, spark, builder = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.bronze_from_kafka")
     module.main()
@@ -584,6 +640,19 @@ def test_validate_upserts_passes_on_clean_data(monkeypatch: pytest.MonkeyPatch) 
     module, _, _ = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.silver_payments")
 
     module._validate_upserts(_make_dq_mock(_CLEAN_QUALITY_METRICS))  # must not raise
+
+
+def test_build_upserts_dedups_latest_per_payment_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    module, _, _ = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.silver_payments")
+
+    frame = FakeFrame()
+    result = module._build_upserts(frame)
+
+    # Dedup must add row_number then filter to row 1, then drop helper columns
+    op_names = [name for name, _ in result.operations]
+    assert "withColumn" in op_names
+    drops = [payload for name, payload in result.operations if name == "drop"]
+    assert ("_rn", "_kafka_offset") in drops
 
 
 # ---------------------------------------------------------------------------
@@ -770,3 +839,20 @@ def test_payments_pipeline_dag_has_expected_shape() -> None:
     assert dag.get_task("silver_transform").downstream_task_ids == {"gold_transform"}
     assert dag.get_task("gold_transform").downstream_task_ids == {"publish_trino_tables"}
     assert dag.get_task("publish_trino_tables").downstream_task_ids == {"validate_trino"}
+
+
+# ---------------------------------------------------------------------------
+# cross-job table name contracts
+# ---------------------------------------------------------------------------
+
+def test_pipeline_table_contracts_are_consistent(monkeypatch: pytest.MonkeyPatch) -> None:
+    bronze, _, _ = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.bronze_from_kafka")
+    silver, _, _ = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.silver_payments")
+    gold,   _, _ = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.gold_metrics")
+
+    # Silver reads from where Bronze writes
+    assert silver.BRONZE_TABLE == bronze.BRONZE_TABLE
+
+    # Gold reads Bronze for partition detection and Silver for recomputation
+    assert gold.BRONZE_TABLE == bronze.BRONZE_TABLE
+    assert gold.SILVER_TABLE == silver.SILVER_TABLE

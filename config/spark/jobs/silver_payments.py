@@ -12,10 +12,12 @@ from pyspark.sql.functions import (
     lit,
     lower,
     regexp_replace,
+    row_number,
     sum as spark_sum,
     trim,
     upper,
 )
+from pyspark.sql.window import Window
 
 
 BRONZE_TABLE    = "iceberg.analytics.payments_bronze"
@@ -60,7 +62,7 @@ def _write_to_dlq(records: DataFrame, batch_id: int, reason: str) -> None:
 
 
 def _build_upserts(batch_df: DataFrame) -> DataFrame:
-    return (
+    projected = (
         batch_df
         .filter(get_json_object(col("kafka_value"), "$.op").isin("c", "u", "r"))
         .select(
@@ -73,8 +75,18 @@ def _build_upserts(batch_df: DataFrame) -> DataFrame:
             upper(trim(get_json_object(col("kafka_value"), "$.after.country_code"))).alias("country_code"),
             from_unixtime(get_json_object(col("kafka_value"), "$.after.created_at").cast("double") / 1_000_000).cast("timestamp").alias("created_at"),
             from_unixtime(get_json_object(col("kafka_value"), "$.after.updated_at").cast("double") / 1_000_000).cast("timestamp").alias("updated_at"),
+            col("kafka_offset").alias("_kafka_offset"),
             current_timestamp().alias("ingested_at"),
         )
+    )
+    # Multiple CDC events for the same payment can land in one batch (replay, back-to-back updates).
+    # Keep only the latest per payment_id — order by updated_at desc with kafka_offset as tiebreaker.
+    latest_per_key = Window.partitionBy("payment_id").orderBy(col("updated_at").desc(), col("_kafka_offset").desc())
+    return (
+        projected
+        .withColumn("_rn", row_number().over(latest_per_key))
+        .filter(col("_rn") == 1)
+        .drop("_rn", "_kafka_offset")
     )
 
 

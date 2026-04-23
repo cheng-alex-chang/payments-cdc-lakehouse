@@ -21,15 +21,17 @@ Postgres (OLTP)
 ### Bronze
 - **Source:** Kafka topic `cdc.public.payments`
 - **Pattern:** Structured Streaming with `trigger(availableNow=True)` and HDFS checkpoint
-- **Schema:** Raw Kafka envelope — `kafka_key`, `kafka_value` (raw Debezium JSON), `kafka_topic`, `kafka_partition`, `kafka_offset`, `kafka_timestamp`
+- **Schema:** Raw Kafka envelope — `kafka_key`, `kafka_value` (Debezium JSON, PII hashed), `kafka_topic`, `kafka_partition`, `kafka_offset`, `kafka_timestamp`
 - **Partitioned by:** `days(kafka_timestamp)`
+- **PII:** `shopper_id` in both `before` and `after` sections is SHA-256 hashed before the Iceberg write so PII never lands in the lakehouse
 - **Guarantee:** Append-only. Every CDC event is preserved exactly once. Checkpoint prevents re-processing on reruns.
 
 ### Silver
 - **Source:** Bronze Iceberg table (Iceberg streaming source)
-- **Pattern:** Streaming `foreachBatch` → `MERGE INTO` for inserts/updates, `DELETE FROM` for Debezium `op=d`
+- **Pattern:** Streaming `foreachBatch` → dedup by `payment_id` (latest `updated_at`, tiebroken by `kafka_offset`) → `MERGE INTO` for inserts/updates, `DELETE FROM` for Debezium `op=d`
 - **Schema:** Canonical payment record — typed, normalised text fields, exact-precision `DECIMAL(12,2)` amount, timestamps in microseconds converted to `TIMESTAMP`
 - **Partitioned by:** `days(created_at)`
+- **Replay safety:** Multiple CDC events per key in the same batch (replay from earliest offset, back-to-back updates) collapse to the latest version before MERGE, so reruns converge to the same current state as an incremental run
 - **Guarantee:** Current state of each payment. Handles the full CDC contract: inserts, updates, and deletes.
 
 ### Gold
@@ -62,8 +64,11 @@ Debezium sets `op=d` on delete events and populates `before` instead of `after`.
 ## Known Limitations
 
 - **Single Spark executor.** Jobs run on `local[*]` inside one container. Horizontal scaling would require a proper Spark cluster (YARN, Kubernetes) and external shuffle service.
+- **Single-replica HDFS.** Replication factor 1 with one datanode. All long-running containers use `restart: unless-stopped` with healthchecks, so a crashed datanode comes back automatically and dependent services (Hive Metastore, Spark, Trino) wait on `condition: service_healthy` before talking to it — so transient container crashes self-recover. The residual gap is data durability: a lost datanode volume would still lose the blocks. Production would use replication factor 3+ across multiple datanodes, or managed object storage (S3, GCS, ADLS) where block loss is not possible.
 - **No schema evolution handling.** If the Postgres schema changes, Debezium will emit new fields but the silver `CREATE TABLE IF NOT EXISTS` will not add columns automatically. A schema migration step would be needed.
-- **Data quality scope.** Silver now fails fast on invalid IDs, negative amounts, malformed country/currency codes, unsupported methods/statuses, and timestamps that move backward. A production platform would typically extend this with reconciliation against source totals and external alerting.
+- **Delete-then-recreate within one batch.** If `op=d` and a later `op=c` for the same `payment_id` land in the same micro-batch, the upsert MERGE runs first and the DELETE then removes the recreated row. Rare in practice since Postgres usually reuses deterministic keys, but would need ordered per-key resolution to handle correctly.
+- **Data quality scope.** Silver fails fast on invalid IDs, negative amounts, malformed country/currency codes, unsupported methods/statuses, and timestamps that move backward. A production platform would typically extend this with reconciliation against source totals and external alerting.
+- **GDPR erasure.** Bronze is append-only. Right-to-be-forgotten would require an explicit erasure workflow that identifies affected Bronze offsets, deletes them, and expires old Iceberg snapshots.
 
 ## Orchestration
 

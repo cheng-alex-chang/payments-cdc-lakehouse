@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col
+from pyspark.sql.functions import col, udf
+from pyspark.sql.types import StringType
 
 
 KAFKA_BOOTSTRAP = "kafka:29092"
@@ -11,8 +14,28 @@ KAFKA_TOPIC     = "cdc.public.payments"
 BRONZE_TABLE    = "iceberg.analytics.payments_bronze"
 CHECKPOINT_PATH = "hdfs://namenode:9000/checkpoints/bronze"
 
+# Fields hashed before writing to Bronze so PII never lands in the lakehouse.
+PII_FIELDS = {"shopper_id"}
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
 LOGGER = logging.getLogger(__name__)
+
+
+def _mask_pii_fields(value: str | None) -> str | None:
+    """Hash PII fields in both `before` and `after` sections of a Debezium envelope."""
+    if value is None:
+        return None
+    try:
+        envelope = json.loads(value)
+        for section in ("before", "after"):
+            if isinstance(envelope.get(section), dict):
+                for field in PII_FIELDS:
+                    if field in envelope[section] and envelope[section][field] is not None:
+                        raw = str(envelope[section][field]).encode()
+                        envelope[section][field] = hashlib.sha256(raw).hexdigest()
+        return json.dumps(envelope)
+    except (json.JSONDecodeError, TypeError):
+        return value
 
 
 def main() -> None:
@@ -43,6 +66,8 @@ def main() -> None:
         PARTITIONED BY (days(kafka_timestamp))
     """)
 
+    mask_udf = udf(_mask_pii_fields, StringType())
+
     stream = (
         spark.readStream
         .format("kafka")
@@ -58,6 +83,7 @@ def main() -> None:
             col("offset").alias("kafka_offset"),
             col("timestamp").alias("kafka_timestamp"),
         )
+        .withColumn("kafka_value", mask_udf(col("kafka_value")))
     )
 
     query = (
