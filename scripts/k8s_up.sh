@@ -15,7 +15,7 @@ done
 cd "${ROOT_DIR}"
 
 # The overlay reads passwords from a gitignored secrets.env (see secrets.env.example).
-# Seed it from the example on first run so `kubectl apply -k` can render.
+# Seed it from the example on first run so the overlay can render.
 SECRETS_ENV="${ROOT_DIR}/k8s/overlays/local/secrets.env"
 if [ ! -f "${SECRETS_ENV}" ]; then
   cp "${SECRETS_ENV}.example" "${SECRETS_ENV}"
@@ -30,12 +30,14 @@ kind get clusters | grep -qx "${CLUSTER_NAME}" \
        --kubeconfig "${KUBECONFIG_PATH}" --wait 120s
 docker build -t local/data-pipeline-airflow:dev -f config/airflow/Dockerfile .
 docker build -t local/trino-exporter:dev config/trino-exporter
+docker build -t local/payments-api:dev -f config/api/Dockerfile .
 cp drivers/postgresql-42.7.5.jar config/hive-metastore/postgresql-42.7.5.jar
 trap 'rm -f "${ROOT_DIR}/config/hive-metastore/postgresql-42.7.5.jar"' EXIT
 docker build -t local/hive-metastore:dev config/hive-metastore
 rm -f config/hive-metastore/postgresql-42.7.5.jar
 kind load docker-image local/data-pipeline-airflow:dev --name data-pipeline
 kind load docker-image local/trino-exporter:dev --name data-pipeline
+kind load docker-image local/payments-api:dev --name data-pipeline
 kind load docker-image local/hive-metastore:dev --name data-pipeline
 
 # Jobs have immutable pod templates, so `kubectl apply` over an existing Job
@@ -43,7 +45,15 @@ kind load docker-image local/hive-metastore:dev --name data-pipeline
 # script recreates them cleanly. Harmless on a fresh cluster (nothing to delete).
 KUBECONFIG="${KUBECONFIG_PATH}" kubectl delete jobs --all -n data-pipeline \
   --ignore-not-found --wait=false 2>/dev/null || true
-KUBECONFIG="${KUBECONFIG_PATH}" kubectl apply -k k8s/overlays/local
+# The base kustomization generates its ConfigMaps from the repo's real config files (the same
+# ones Compose bind-mounts) rather than from a copy, so the two runtimes cannot drift. Those
+# paths sit outside the kustomization root, which Kustomize refuses by default, so render with
+# --load-restrictor=LoadRestrictionsNone and pipe into apply. `kubectl apply -k` has no such
+# flag. The documented tradeoff is that the kustomization is no longer relocatable, which costs
+# nothing here: it is repo-local and never vendored into another tree.
+KUBECONFIG="${KUBECONFIG_PATH}" kubectl kustomize \
+  --load-restrictor=LoadRestrictionsNone k8s/overlays/local \
+  | KUBECONFIG="${KUBECONFIG_PATH}" kubectl apply -f -
 
 echo
 echo "Local Kubernetes foundation is ready."

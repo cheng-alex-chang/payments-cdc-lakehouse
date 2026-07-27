@@ -37,6 +37,12 @@ spec:
         - name: hive-metastore
           image: local/hive-metastore:dev
           imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              memory: 1Gi
           ports:
             - name: thrift
               containerPort: 9083

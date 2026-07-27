@@ -7,7 +7,7 @@ A payments data-engineering project that runs **both** dominant analytics paradi
 - **Streaming lakehouse (operational):** `Postgres → Debezium/Kafka Connect → Kafka → PySpark → Iceberg on HDFS → Trino` — near-real-time CDC on an open table format.
 - **Batch cloud warehouse (financial):** `FX REST API + Postgres → AWS S3 → Snowflake + dbt` — incremental batch ELT that normalizes every payment to USD for cross-currency analytics over a star schema.
 
-Shared across both: `Airflow` orchestration, `Terraform` governance (Databricks + Snowflake/S3), `Hive Metastore` as the Iceberg catalog, `Metabase` ad-hoc dashboards, `Prometheus + Grafana` monitoring, and `pytest` + GitHub Actions CI.
+Shared across both: `Airflow` orchestration, `Terraform` governance (Databricks + Snowflake/S3), `Hive Metastore` as the Iceberg catalog, `Trino` interactive SQL over Iceberg, a `FastAPI` serving tier over gold, `Prometheus + Grafana` observability, and `pytest` + GitHub Actions CI.
 
 See [docs/design.md](docs/design.md) for layer contracts (both pipelines), incremental processing, and CDC delete handling; [snowflake_etl/README.md](snowflake_etl/README.md) for the Snowflake FX ELT; and [docs/production-readiness.md](docs/production-readiness.md) for the hardening backlog.
 
@@ -17,9 +17,16 @@ The same medallion contract (bronze → silver → gold, CDC-aware) runs three w
 
 | Target | What it is | Entry point |
 |--------|------------|-------------|
-| **Docker Compose** | Fastest local runtime — the full stack with one command | `docker compose up -d` |
-| **Kubernetes (kind)** | The platform as Kustomize manifests (HDFS, Hive Metastore, Trino, Kafka/Debezium, Spark, Airflow, observability) on a `kind` cluster | `bash scripts/k8s_up.sh` |
+| **Kubernetes (kind)** | The production-shaped deployment — the whole platform as Kustomize manifests (HDFS, Hive Metastore, Trino, Kafka/Debezium, Spark, Airflow, observability) | `bash scripts/k8s_up.sh` |
+| **Docker Compose** | The fast inner loop — same services, same config files, one command, no cluster | `docker compose up -d` |
 | **Databricks (Lakeflow)** | Serverless Unity Catalog + Delta port as a Lakeflow Declarative Pipeline — Auto Loader, AUTO CDC, expectations — deployed via an Asset Bundle | [`databricks/`](databricks/README.md) |
+
+Kubernetes is the realistic target: nothing ships to production on Compose. Compose stays because
+it starts in seconds and is the faster edit-run loop — the same split most teams actually run.
+**Both read the identical config files**: the Kustomize ConfigMaps are generated straight from
+`config/`, `airflow/dags/`, `scripts/`, and `sql/`, so the two runtimes cannot drift. The only
+exceptions are three files under [`k8s/base/overrides/`](k8s/base/overrides) that must genuinely
+differ on Kubernetes (pod memory ceilings, bind-host settings), each documenting why in its header.
 
 ## Architecture
 
@@ -64,11 +71,43 @@ FX REST API + Postgres
 - Reads only silver — strictly linear `bronze → silver → gold` lineage, no bronze or Debezium-envelope access
 - Full idempotent recompute: one `GROUP BY` over silver, `INSERT OVERWRITE` replaces the whole table every run (so hours emptied by deletes drop out)
 
+## Gold Serving API
+
+The pipeline moves data inward — Postgres → CDC → Kafka → Spark → Iceberg → Trino. That gets an
+analyst to a SQL prompt and Grafana to a chart, but nothing hands results back to an application.
+A read-only **FastAPI** tier closes that loop over the same gold table. See [`api/`](api/README.md).
+
+```bash
+curl 'http://localhost:8000/v1/metrics/hourly?country_code=NL&limit=5'
+curl 'http://localhost:8000/v1/metrics/summary?start=2026-03-01T00:00:00'
+```
+
+Four decisions carry the design:
+
+- **Filters compile to SQL, not Python.** Gold is `PARTITIONED BY (days(payment_hour))`, so a bounded
+  range lets Iceberg prune files before anything is read. Filtering in the process would make every
+  request a full-table scan.
+- **Keyset pagination, not `OFFSET`.** `OFFSET` makes the engine read and discard every skipped row;
+  the cursor encodes the last `(payment_hour, country_code, payment_method)` seen, so page 500 costs
+  what page 1 costs.
+- **Cache keyed on the Iceberg snapshot id, not a TTL.** Every `INSERT OVERWRITE` on gold commits a
+  new snapshot, so keying entries on it makes invalidation exact — a response can't outlive the data
+  it was built from, and never expires early while the data is unchanged.
+- **Money is a string on the wire.** `gross_volume` is `DECIMAL(18,2)`; as a JSON number it would
+  reach a browser as an IEEE double and reintroduce the rounding the warehouse type prevents.
+
+The whole suite runs with **no Trino driver installed and no warehouse reachable** — the driver is
+imported lazily inside `connect_from_env`, so tests inject a fake DBAPI connection underneath the
+real repository. That's why `trino` lives in `requirements-api.txt`, not `requirements-ci.txt`:
+keeping it out of CI is what proves the lazy import still holds.
+
 ## Repo Layout
 
 ```text
 airflow/dags/                  Airflow DAGs
+api/src/                       FastAPI serving tier over the gold Iceberg table
 config/airflow/                Airflow Docker image
+config/api/                    Serving API Docker image
 config/connect/                Debezium connector config
 config/grafana/                Grafana provisioning and dashboards
 config/hadoop/                 Hadoop config
@@ -118,7 +157,7 @@ bash scripts/register_connector.sh
 - Kafka Connect: `http://localhost:8083`
 - Trino: `http://localhost:8080`
 - HDFS NameNode UI: `http://localhost:9870`
-- Metabase: `http://localhost:3000`
+- Payments Gold API: `http://localhost:8000/docs`
 - Prometheus: `http://localhost:9090`
 - Grafana: `http://localhost:3001`
 
@@ -139,15 +178,23 @@ source .venv/bin/activate
 pytest --cov --cov-report=term-missing
 ```
 
-## Optional Local Kubernetes
+## Kubernetes (production-shaped deployment)
 
-Docker Compose remains the fastest local runtime. A no-cost Kubernetes path is also available for local infrastructure and orchestration workflows: `scripts/k8s_up.sh` creates a local `kind` cluster and applies the Kustomize overlay. The overlay renders the full platform shape, including stateful databases, HDFS, Hive Metastore, Trino, Kafka/Connect, Spark job templates, Airflow, observability, and analytics UI workloads.
+`scripts/k8s_up.sh` creates a local `kind` cluster and applies the Kustomize overlay, rendering the
+full platform: stateful databases, HDFS, Hive Metastore, Trino, Kafka/Connect, Spark job templates,
+Airflow, observability (including provisioned Grafana datasources and dashboards), and analytics
+UI workloads — 60 objects in total.
+
+The ConfigMaps are generated from the repo's real config files rather than a copy kept in step by
+hand, so a Spark job or seed script edit reaches both runtimes at once. Those paths sit outside the
+kustomization root, so the render uses `--load-restrictor=LoadRestrictionsNone`; the tradeoff is
+that the kustomization is no longer relocatable, which costs nothing for a repo-local overlay.
 
 ```bash
 bash scripts/k8s_up.sh
 export KUBECONFIG=.kind/kubeconfig
 kubectl get statefulsets,pods,svc,pvc -n data-pipeline
-python scripts/validate_k8s_manifests.py
+python3 scripts/validate_k8s_manifests.py
 ```
 
 Stop and remove the local cluster with:
@@ -265,9 +312,26 @@ docker exec dp-trino trino --execute "SELECT payment_id, amount, payment_method,
 docker exec dp-trino trino --execute "SELECT * FROM iceberg.analytics.payment_metrics_gold ORDER BY payment_hour, country_code, payment_method"
 ```
 
-## Visualization
+## Observability
 
-Grafana provisions a `Payments Demo Overview` dashboard. The six payment-aggregate panels read the curated **gold** layer (`iceberg.analytics.payment_metrics_gold`) through **Trino**, so the dashboard reflects the pipeline's actual output instead of querying the source database directly. The two refund panels still read source Postgres — `refunds` is tracked for schema-drift only and has no silver/gold layer yet (a separate refunds medallion is future work). Open `http://localhost:3001`, go to the `Data Platform` folder, and you should see charts for:
+Grafana is for **operating the platform**, not for business reporting. Business analytics is served
+by the [gold API](api/README.md) — that is where a consumer should go for payment volume by country.
+Prometheus is a metrics store, not an analytics store: pushing business dimensions
+(country × method × merchant) into it causes cardinality explosion, and the data already lives in
+Iceberg with full history.
+
+Two provisioned dashboards, both in the `Data Platform` folder at `http://localhost:3001`:
+
+**Platform Overview** — infrastructure and service health from Prometheus: Airflow scheduler
+heartbeat, task completions by state, Trino query activity, and the gold API's request rate, p99
+latency by endpoint, and snapshot-cache hit ratio.
+
+**Pipeline Output Validation** — *is the pipeline producing sane output?* These panels read the
+curated **gold** layer (`iceberg.analytics.payment_metrics_gold`) through **Trino**, so they catch
+bad loads: row counts that stop reconciling, an authorization rate outside its plausible band, an
+hour with no volume (a missed load), a sudden shift in method or country mix. The two refund panels
+still read source Postgres — `refunds` is tracked for schema-drift only and has no silver/gold layer
+yet (a separate refunds medallion is future work). Panels:
 
 - total payments _(gold)_
 - gross volume _(gold)_

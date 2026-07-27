@@ -73,8 +73,16 @@ spec:
           image: spark:3.5.8-python3
           command:
             - /opt/spark/bin/spark-submit
+            # local[2] rather than local[*]: on a multi-core node local[*] starts one task thread
+            # per core inside a single JVM, and each carries its own shuffle and read buffers.
+            # These datasets are small, so extra threads buy nothing and multiply memory.
             - --master
-            - local[*]
+            - local[2]
+            # Without an explicit heap the JVM sizes its default maximum off the node's total
+            # memory, ignoring the pod it lives in, and the kernel OOM-kills the driver. Keep the
+            # heap well under the container limit below, which also covers metaspace and off-heap.
+            - --driver-memory
+            - 1g
             - --conf
             - spark.jars.ivy=/tmp/.ivy2
             - --packages
@@ -85,6 +93,16 @@ spec:
               value: /tmp
             - name: HADOOP_CONF_DIR
               value: /opt/spark/conf
+          # An unbounded Spark driver is the classic way to take a Kubernetes node down: with no
+          # requests the scheduler cannot reason about the pod at all, and with no limit the JVM
+          # grows until the kernel picks a victim. The limit is roughly twice the driver heap to
+          # leave room for metaspace, thread stacks, and off-heap buffers.
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              memory: 2Gi
           volumeMounts:
             - name: spark-jobs
               mountPath: /opt/project/config/spark/jobs
@@ -125,8 +143,16 @@ spec:
           image: spark:3.5.8-python3
           command:
             - /opt/spark/bin/spark-submit
+            # local[2] rather than local[*]: on a multi-core node local[*] starts one task thread
+            # per core inside a single JVM, and each carries its own shuffle and read buffers.
+            # These datasets are small, so extra threads buy nothing and multiply memory.
             - --master
-            - local[*]
+            - local[2]
+            # Without an explicit heap the JVM sizes its default maximum off the node's total
+            # memory, ignoring the pod it lives in, and the kernel OOM-kills the driver. Keep the
+            # heap well under the container limit below, which also covers metaspace and off-heap.
+            - --driver-memory
+            - 1g
             - --conf
             - spark.jars.ivy=/tmp/.ivy2
             - --packages
@@ -137,6 +163,16 @@ spec:
               value: /tmp
             - name: HADOOP_CONF_DIR
               value: /opt/spark/conf
+          # An unbounded Spark driver is the classic way to take a Kubernetes node down: with no
+          # requests the scheduler cannot reason about the pod at all, and with no limit the JVM
+          # grows until the kernel picks a victim. The limit is roughly twice the driver heap to
+          # leave room for metaspace, thread stacks, and off-heap buffers.
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              memory: 2Gi
           volumeMounts:
             - name: spark-jobs
               mountPath: /opt/project/config/spark/jobs
@@ -177,8 +213,16 @@ spec:
           image: spark:3.5.8-python3
           command:
             - /opt/spark/bin/spark-submit
+            # local[2] rather than local[*]: on a multi-core node local[*] starts one task thread
+            # per core inside a single JVM, and each carries its own shuffle and read buffers.
+            # These datasets are small, so extra threads buy nothing and multiply memory.
             - --master
-            - local[*]
+            - local[2]
+            # Without an explicit heap the JVM sizes its default maximum off the node's total
+            # memory, ignoring the pod it lives in, and the kernel OOM-kills the driver. Keep the
+            # heap well under the container limit below, which also covers metaspace and off-heap.
+            - --driver-memory
+            - 1g
             - --conf
             - spark.jars.ivy=/tmp/.ivy2
             - --packages
@@ -189,6 +233,16 @@ spec:
               value: /tmp
             - name: HADOOP_CONF_DIR
               value: /opt/spark/conf
+          # An unbounded Spark driver is the classic way to take a Kubernetes node down: with no
+          # requests the scheduler cannot reason about the pod at all, and with no limit the JVM
+          # grows until the kernel picks a victim. The limit is roughly twice the driver heap to
+          # leave room for metaspace, thread stacks, and off-heap buffers.
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              memory: 2Gi
           volumeMounts:
             - name: spark-jobs
               mountPath: /opt/project/config/spark/jobs

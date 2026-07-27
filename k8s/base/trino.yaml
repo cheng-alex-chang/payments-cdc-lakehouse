@@ -36,6 +36,15 @@ spec:
       containers:
         - name: trino
           image: trinodb/trino:477
+          # overrides/trino-jvm.config caps the heap at 512M, but a JVM needs metaspace, thread
+          # stacks, and direct buffers on top of it. Without a request the scheduler treats this
+          # pod as free and packs the node until the kernel OOM-kills it (observed: 15 restarts).
+          resources:
+            requests:
+              cpu: 250m
+              memory: 768Mi
+            limits:
+              memory: 1280Mi
           ports:
             - name: http
               containerPort: 8080

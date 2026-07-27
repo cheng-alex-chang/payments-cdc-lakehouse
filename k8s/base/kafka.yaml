@@ -42,6 +42,14 @@ spec:
       containers:
         - name: kafka
           image: confluentinc/cp-kafka:7.6.1
+          # KAFKA_HEAP_OPTS below sets -Xmx384m; the limit leaves room for the JVM's non-heap
+          # footprint and the page cache Kafka leans on for log segments.
+          resources:
+            requests:
+              cpu: 250m
+              memory: 640Mi
+            limits:
+              memory: 1Gi
           ports:
             - name: broker
               containerPort: 29092
@@ -85,6 +93,12 @@ spec:
                 - kafka-broker-api-versions --bootstrap-server localhost:29092 >/dev/null 2>&1
             initialDelaySeconds: 60
             periodSeconds: 15
+            # kafka-broker-api-versions starts a JVM, which takes ~1s even on an idle broker and
+            # longer while Spark jobs are competing for CPU. timeoutSeconds defaults to 1, so
+            # without this the probe times out against a perfectly healthy broker and the pod
+            # never goes Ready -- Kafka serves traffic while Kubernetes reports it unavailable.
+            timeoutSeconds: 15
+            failureThreshold: 6
           volumeMounts:
             - name: kafka-data
               mountPath: /var/lib/kafka/data
@@ -137,6 +151,12 @@ spec:
       containers:
         - name: kafka-connect
           image: debezium/connect:2.6
+          resources:
+            requests:
+              cpu: 100m
+              memory: 384Mi
+            limits:
+              memory: 768Mi
           ports:
             - name: http
               containerPort: 8083
@@ -192,6 +212,12 @@ spec:
       containers:
         - name: register
           image: python:3.11-slim
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
           env:
             - name: POSTGRES_USER
               valueFrom:

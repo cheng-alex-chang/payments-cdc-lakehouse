@@ -7,6 +7,11 @@ metadata:
     app.kubernetes.io/name: namenode
     app.kubernetes.io/component: hdfs
 spec:
+  # Headless: this Service governs the namenode StatefulSet, and stable per-pod DNS
+  # (namenode-0.namenode.<ns>.svc.cluster.local) only exists when clusterIP is None. A
+  # ClusterIP here would also put a load balancer in front of an HDFS RPC endpoint, which
+  # expects to be addressed directly.
+  clusterIP: None
   selector:
     app.kubernetes.io/name: namenode
   ports:
@@ -43,6 +48,14 @@ spec:
       containers:
         - name: namenode
           image: apache/hadoop:3
+          # The NameNode holds the entire filesystem namespace in heap, so starving it takes HDFS
+          # down and every consumer (Hive Metastore, Spark, Trino) with it.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              memory: 1Gi
           command:
             - /bin/bash
             - -lc
@@ -100,12 +113,27 @@ metadata:
     app.kubernetes.io/name: datanode
     app.kubernetes.io/component: hdfs
 spec:
+  # Headless, and load-bearing. hdfs-site.xml sets dfs.datanode.use.datanode.hostname=true, so
+  # the DataNode registers with the NameNode under its stable per-pod name
+  # (datanode-0.datanode.<ns>.svc.cluster.local) and every HDFS *client* resolves that name to
+  # read blocks. StatefulSet per-pod DNS only exists when the governing Service is headless, so
+  # with a ClusterIP the name does not resolve and reads fail with UnknownHostException -- while
+  # writes, which the NameNode brokers, appear to succeed.
+  clusterIP: None
   selector:
     app.kubernetes.io/name: datanode
   ports:
     - name: http
       port: 9864
       targetPort: http
+    # Block transfer and client IPC. Clients talk to the DataNode on 9866 directly; omitting it
+    # left the Service describing only the web UI.
+    - name: data
+      port: 9866
+      targetPort: 9866
+    - name: ipc
+      port: 9867
+      targetPort: 9867
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -133,6 +161,12 @@ spec:
       containers:
         - name: datanode
           image: apache/hadoop:3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              memory: 1Gi
           command:
             - hdfs
             - datanode
@@ -194,6 +228,12 @@ spec:
       containers:
         - name: hdfs-init
           image: apache/hadoop:3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
           env:
             - name: HADOOP_USER_NAME
               value: root

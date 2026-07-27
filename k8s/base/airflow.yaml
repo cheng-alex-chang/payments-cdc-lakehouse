@@ -37,6 +37,12 @@ spec:
       containers:
         - name: postgres
           image: postgres:15
+          resources:
+            requests:
+              cpu: 50m
+              memory: 192Mi
+            limits:
+              memory: 384Mi
           ports:
             - name: postgres
               containerPort: 5432
@@ -131,6 +137,12 @@ spec:
       containers:
         - name: airflow-init
           image: local/data-pipeline-airflow:dev
+          resources:
+            requests:
+              cpu: 100m
+              memory: 384Mi
+            limits:
+              memory: 768Mi
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash
@@ -147,13 +159,17 @@ spec:
             - name: AIRFLOW__CORE__LOAD_EXAMPLES
               value: "false"
           volumeMounts:
-            # Mount the single DAG file via subPath so Kubernetes materializes a plain
-            # file, not a ConfigMap directory. A directory mount carries the atomic-update
-            # `..data` symlink, which Airflow's DAG walker follows into a "recursive loop"
+            # Mount each DAG file via subPath so Kubernetes materializes plain files, not a
+            # ConfigMap directory. A directory mount carries the atomic-update `..data`
+            # symlink, which Airflow's DAG walker follows into a "recursive loop"
             # (find_path_from_directory) that crashloops the DagFileProcessor.
+            # alerts.py is imported by payments_pipeline.py, so it mounts alongside it.
             - name: airflow-dags
               mountPath: /opt/airflow/dags/payments_pipeline.py
               subPath: payments_pipeline.py
+            - name: airflow-dags
+              mountPath: /opt/airflow/dags/alerts.py
+              subPath: alerts.py
             - name: pipeline-scripts
               mountPath: /opt/airflow/scripts
             - name: trino-validation-sql
@@ -235,6 +251,12 @@ spec:
       containers:
         - name: webserver
           image: local/data-pipeline-airflow:dev
+          resources:
+            requests:
+              cpu: 100m
+              memory: 384Mi
+            limits:
+              memory: 768Mi
           imagePullPolicy: IfNotPresent
           command:
             - airflow
@@ -261,13 +283,17 @@ spec:
             - name: AIRFLOW__METRICS__STATSD_PREFIX
               value: airflow
           volumeMounts:
-            # Mount the single DAG file via subPath so Kubernetes materializes a plain
-            # file, not a ConfigMap directory. A directory mount carries the atomic-update
-            # `..data` symlink, which Airflow's DAG walker follows into a "recursive loop"
+            # Mount each DAG file via subPath so Kubernetes materializes plain files, not a
+            # ConfigMap directory. A directory mount carries the atomic-update `..data`
+            # symlink, which Airflow's DAG walker follows into a "recursive loop"
             # (find_path_from_directory) that crashloops the DagFileProcessor.
+            # alerts.py is imported by payments_pipeline.py, so it mounts alongside it.
             - name: airflow-dags
               mountPath: /opt/airflow/dags/payments_pipeline.py
               subPath: payments_pipeline.py
+            - name: airflow-dags
+              mountPath: /opt/airflow/dags/alerts.py
+              subPath: alerts.py
             - name: pipeline-scripts
               mountPath: /opt/airflow/scripts
             - name: trino-validation-sql
@@ -333,6 +359,12 @@ spec:
       containers:
         - name: scheduler
           image: local/data-pipeline-airflow:dev
+          resources:
+            requests:
+              cpu: 100m
+              memory: 384Mi
+            limits:
+              memory: 768Mi
           imagePullPolicy: IfNotPresent
           command:
             - airflow
@@ -356,13 +388,17 @@ spec:
             - name: AIRFLOW__METRICS__STATSD_PREFIX
               value: airflow
           volumeMounts:
-            # Mount the single DAG file via subPath so Kubernetes materializes a plain
-            # file, not a ConfigMap directory. A directory mount carries the atomic-update
-            # `..data` symlink, which Airflow's DAG walker follows into a "recursive loop"
+            # Mount each DAG file via subPath so Kubernetes materializes plain files, not a
+            # ConfigMap directory. A directory mount carries the atomic-update `..data`
+            # symlink, which Airflow's DAG walker follows into a "recursive loop"
             # (find_path_from_directory) that crashloops the DagFileProcessor.
+            # alerts.py is imported by payments_pipeline.py, so it mounts alongside it.
             - name: airflow-dags
               mountPath: /opt/airflow/dags/payments_pipeline.py
               subPath: payments_pipeline.py
+            - name: airflow-dags
+              mountPath: /opt/airflow/dags/alerts.py
+              subPath: alerts.py
             - name: pipeline-scripts
               mountPath: /opt/airflow/scripts
             - name: trino-validation-sql

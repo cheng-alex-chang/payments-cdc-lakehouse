@@ -1,6 +1,15 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
+# ConfigMaps are generated from the repo's real config files -- the same ones Docker Compose
+# bind-mounts -- so the two runtimes can never drift. Paths reach outside this kustomization
+# root, which Kustomize blocks by default, so scripts/k8s_up.sh renders with
+# `kubectl kustomize --load-restrictor=LoadRestrictionsNone` before applying.
+#
+# The only exceptions are the three files under overrides/, which must genuinely differ on
+# Kubernetes (pod memory ceilings and bind-host settings). Each carries a header comment
+# explaining why; see docs/kubernetes.md. Nothing else belongs there.
+
 resources:
   - namespace.yaml
   - postgres.yaml
@@ -11,8 +20,8 @@ resources:
   - kafka.yaml
   - spark.yaml
   - airflow.yaml
+  - api.yaml
   - observability.yaml
-  - metabase.yaml
 
 generatorOptions:
   disableNameSuffixHash: true
@@ -23,61 +32,84 @@ configMapGenerator:
   - name: hadoop-config
     namespace: data-pipeline
     files:
-      - core-site.xml=config/hadoop/core-site.xml
-      - hdfs-site.xml=config/hadoop/hdfs-site.xml
+      - core-site.xml=../../config/hadoop/core-site.xml
+      # Kubernetes needs bind-host + registration-check changes; see overrides/hdfs-site.xml.
+      - hdfs-site.xml=overrides/hdfs-site.xml
   - name: hive-metastore-config
     namespace: data-pipeline
     files:
-      - hive-site.xml=config/hive-metastore/hive-site.xml
+      - hive-site.xml=../../config/hive-metastore/hive-site.xml
   - name: trino-etc
     namespace: data-pipeline
     files:
-      - config.properties=config/trino/etc/config.properties
-      - jvm.config=config/trino/etc/jvm.config
-      - node.properties=config/trino/etc/node.properties
+      # Kubernetes needs a smaller heap and query memory caps; see the two overrides/ files.
+      - config.properties=overrides/trino-config.properties
+      - jvm.config=overrides/trino-jvm.config
+      - node.properties=../../config/trino/etc/node.properties
   - name: trino-catalog
     namespace: data-pipeline
     files:
-      - hive.properties=config/trino/catalog/hive.properties
-      - iceberg.properties=config/trino/catalog/iceberg.properties
+      - hive.properties=../../config/trino/catalog/hive.properties
+      - iceberg.properties=../../config/trino/catalog/iceberg.properties
   - name: prometheus-config
     namespace: data-pipeline
     files:
-      - prometheus.yml=config/prometheus/prometheus.yml
+      - prometheus.yml=../../config/prometheus/prometheus.yml
+  # Grafana provisioning: the same datasources and dashboards Compose mounts, so both runtimes
+  # come up with an identically configured monitoring tier rather than a blank Grafana.
+  - name: grafana-datasources
+    namespace: data-pipeline
+    files:
+      - prometheus.yml=../../config/grafana/provisioning/datasources/prometheus.yml
+  - name: grafana-dashboard-providers
+    namespace: data-pipeline
+    files:
+      - dashboards.yml=../../config/grafana/provisioning/dashboards/dashboards.yml
+  - name: grafana-dashboards
+    namespace: data-pipeline
+    files:
+      - pipeline-output.json=../../config/grafana/dashboards/pipeline-output.json
+      - platform-overview.json=../../config/grafana/dashboards/platform-overview.json
   - name: statsd-config
     namespace: data-pipeline
     files:
-      - mapping.yml=config/statsd/mapping.yml
+      - mapping.yml=../../config/statsd/mapping.yml
   - name: postgres-init
     namespace: data-pipeline
     files:
-      - 001_create_tables.sql=config/postgres/init/001_create_tables.sql
-      - 002_seed_data.sql=config/postgres/init/002_seed_data.sql
+      - 001_create_tables.sql=../../config/postgres/init/001_create_tables.sql
+      - 002_seed_data.sql=../../config/postgres/init/002_seed_data.sql
   - name: kafka-connect-config
     namespace: data-pipeline
     files:
-      - postgres-cdc.json=config/connect/postgres-cdc.json
+      - postgres-cdc.json=../../config/connect/postgres-cdc.json
   - name: spark-jobs
     namespace: data-pipeline
     files:
-      - bronze_from_kafka.py=config/spark/jobs/bronze_from_kafka.py
-      - silver_payments.py=config/spark/jobs/silver_payments.py
-      - gold_metrics.py=config/spark/jobs/gold_metrics.py
-      - common.py=config/spark/jobs/common.py
+      - bronze_from_kafka.py=../../config/spark/jobs/bronze_from_kafka.py
+      - silver_payments.py=../../config/spark/jobs/silver_payments.py
+      - gold_metrics.py=../../config/spark/jobs/gold_metrics.py
+      - common.py=../../config/spark/jobs/common.py
+  # payments_pipeline.py does `from alerts import notify_failure`, so alerts.py has to ship
+  # alongside it or the DagFileProcessor fails to import the DAG. snowflake_fx_etl.py is
+  # deliberately excluded: it imports SnowflakeOperator and snowflake_etl.src, neither of which
+  # exists in the cluster Airflow image, and an unimportable DAG breaks scheduler parsing.
   - name: airflow-dags
     namespace: data-pipeline
     files:
-      - payments_pipeline.py=config/airflow/dags/payments_pipeline.py
+      - payments_pipeline.py=../../airflow/dags/payments_pipeline.py
+      - alerts.py=../../airflow/dags/alerts.py
   - name: pipeline-scripts
     namespace: data-pipeline
     files:
-      - init_hdfs.py=config/scripts/init_hdfs.py
-      - publish_trino_tables.py=config/scripts/publish_trino_tables.py
-      - run_local_job.py=config/scripts/run_local_job.py
-      - validate_connector.py=config/scripts/validate_connector.py
-      - validate_schema.py=config/scripts/validate_schema.py
-      - validate_trino.py=config/scripts/validate_trino.py
+      - init_hdfs.py=../../scripts/init_hdfs.py
+      - maintain_iceberg.py=../../scripts/maintain_iceberg.py
+      - publish_trino_tables.py=../../scripts/publish_trino_tables.py
+      - run_local_job.py=../../scripts/run_local_job.py
+      - validate_connector.py=../../scripts/validate_connector.py
+      - validate_schema.py=../../scripts/validate_schema.py
+      - validate_trino.py=../../scripts/validate_trino.py
   - name: trino-validation-sql
     namespace: data-pipeline
     files:
-      - validation_queries.sql=config/sql/trino/validation_queries.sql
+      - validation_queries.sql=../../sql/trino/validation_queries.sql

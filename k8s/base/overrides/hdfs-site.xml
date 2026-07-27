@@ -1,4 +1,23 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Kubernetes override of config/hadoop/hdfs-site.xml.
+
+  Everything here matches the Compose file except three Kubernetes-specific properties, each
+  required because pod networking differs from Compose's user-defined bridge network:
+
+    dfs.namenode.rpc-bind-host  = 0.0.0.0  NameNode must bind the pod IP, not just the Service DNS
+    dfs.namenode.http-bind-host = 0.0.0.0  name; binding only "namenode" leaves the port unreachable
+                                           from other pods.
+    dfs.namenode.datanode.registration.ip-hostname-check = false
+                                           Pod IPs have no matching reverse DNS, so the NameNode
+                                           rejects DataNode registration when this check is on.
+
+  One of exactly three files that legitimately differ between runtimes; see docs/kubernetes.md.
+  Everything else is read straight from the repo-root config/ tree.
+
+  (Note for editors: XML forbids a double hyphen inside a comment. Hadoop's parser rejects the
+  whole file if one appears, and the NameNode crash-loops on an unparseable hdfs-site.xml.)
+-->
 <configuration>
   <property>
     <name>dfs.replication</name>

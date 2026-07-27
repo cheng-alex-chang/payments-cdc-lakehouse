@@ -37,6 +37,12 @@ spec:
       containers:
         - name: postgres
           image: postgres:15
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
           args:
             - -c
             - wal_level=logical

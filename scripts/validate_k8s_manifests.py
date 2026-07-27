@@ -32,9 +32,9 @@ REQUIRED_OBJECTS = {
     ("Deployment", "kafka-connect"),
     ("Deployment", "airflow-webserver"),
     ("Deployment", "airflow-scheduler"),
+    ("Deployment", "api"),
     ("Deployment", "prometheus"),
     ("Deployment", "grafana"),
-    ("Deployment", "metabase"),
     ("Job", "register-postgres-cdc"),
     ("Job", "spark-bronze"),
     ("Job", "spark-silver"),
@@ -43,8 +43,11 @@ REQUIRED_OBJECTS = {
 
 
 def render_kustomize(overlay: Path = DEFAULT_OVERLAY) -> str:
+    # The base kustomization generates ConfigMaps from the repo's real config files rather than
+    # from a copy, so its file paths reach outside the kustomization root. Kustomize blocks that
+    # by default; LoadRestrictionsNone permits it. scripts/k8s_up.sh renders the same way.
     result = subprocess.run(
-        ["kubectl", "kustomize", str(overlay)],
+        ["kubectl", "kustomize", "--load-restrictor=LoadRestrictionsNone", str(overlay)],
         check=True,
         capture_output=True,
         text=True,

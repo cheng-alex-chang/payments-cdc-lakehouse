@@ -40,6 +40,12 @@ spec:
       containers:
         - name: statsd-exporter
           image: prom/statsd-exporter:latest
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
           args:
             - --statsd.mapping-config=/etc/statsd/mapping.yml
           ports:
@@ -95,6 +101,12 @@ spec:
       containers:
         - name: trino-exporter
           image: local/trino-exporter:dev
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
           imagePullPolicy: IfNotPresent
           ports:
             - name: metrics
@@ -138,6 +150,12 @@ spec:
       containers:
         - name: prometheus
           image: prom/prometheus:v3.3.1
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
           ports:
             - name: http
               containerPort: 9090
@@ -188,12 +206,58 @@ spec:
       containers:
         - name: grafana
           image: grafana/grafana:11.6.1
+          resources:
+            requests:
+              cpu: 50m
+              memory: 192Mi
+            limits:
+              memory: 384Mi
           ports:
             - name: http
               containerPort: 3000
+          env:
+            # The "Payments Gold (Trino)" datasource is a plugin, not a core Grafana type; without
+            # this the provisioned datasource loads as "unknown" and every gold panel stays blank.
+            - name: GF_INSTALL_PLUGINS
+              value: trino-datasource
+            # Credentials for the provisioned "Payments Postgres" datasource. Same secret the
+            # source database itself reads, so they cannot fall out of step.
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: platform-secrets
+                  key: POSTGRES_DB
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: platform-secrets
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: platform-secrets
+                  key: POSTGRES_PASSWORD
           volumeMounts:
             - name: grafana-data
               mountPath: /var/lib/grafana
+            # Mirrors the Compose bind mounts: provisioning under /etc/grafana/provisioning and
+            # dashboard JSON under the path dashboards.yml points at. The dashboards mount nests
+            # inside grafana-data, which Kubernetes handles -- the later mount shadows the dir.
+            - name: grafana-datasources
+              mountPath: /etc/grafana/provisioning/datasources
+            - name: grafana-dashboard-providers
+              mountPath: /etc/grafana/provisioning/dashboards
+            - name: grafana-dashboards
+              mountPath: /var/lib/grafana/dashboards
       volumes:
         - name: grafana-data
           emptyDir: {}
+        - name: grafana-datasources
+          configMap:
+            name: grafana-datasources
+        - name: grafana-dashboard-providers
+          configMap:
+            name: grafana-dashboard-providers
+        - name: grafana-dashboards
+          configMap:
+            name: grafana-dashboards
