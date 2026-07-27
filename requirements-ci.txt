@@ -7,3 +7,10 @@ pytest==9.0.3
 pytest-cov==7.1.0
 PyYAML==6.0.3
 ruff==0.15.15
+# Serving API. fastapi/pydantic build the app and its response models; httpx backs FastAPI's
+# TestClient. The `trino` driver is deliberately NOT here -- api/src/trino_client.py imports it
+# lazily inside connect_from_env, so the whole API test suite runs with no driver and no
+# warehouse. Keeping it out of CI is what proves that.
+fastapi==0.140.7
+pydantic==2.13.4
+httpx==0.28.1

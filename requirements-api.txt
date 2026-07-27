@@ -1,0 +1,12 @@
+# Runtime-only dependencies for the serving API container.
+#
+# Split from requirements-ci.txt for the same reason as requirements-snowflake.txt: CI has no
+# Trino to talk to and no server to run, so these buy nothing there. The unit tests exercise the
+# SQL builders, cache, cursor codec, and routing through FastAPI's TestClient with a stubbed
+# repository, none of which needs a driver or a live warehouse.
+#
+# Install alongside requirements-ci.txt to run the API locally:
+#   pip install -r requirements-ci.txt -r requirements-api.txt
+#   uvicorn api.src.app:app --reload --port 8000
+trino==0.338.0
+uvicorn==0.51.0

@@ -1,6 +1,7 @@
 [run]
 source =
     airflow/dags
+    api/src
     config/spark/jobs
     scripts
 

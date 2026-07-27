@@ -35,12 +35,15 @@ jobs:
 
       - run: pip install -r requirements-ci.txt
 
+      # api/src is covered here without installing the Trino driver: trino_client imports it
+      # lazily inside connect_from_env, so every API test runs against a fake DBAPI connection.
       - run: >-
           pytest
           --cov=config/spark/jobs
           --cov=scripts
           --cov=databricks/src/common.py
           --cov=snowflake_etl/src
+          --cov=api/src
           --cov-report=term-missing
           --cov-fail-under=80
 

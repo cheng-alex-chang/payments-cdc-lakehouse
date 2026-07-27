@@ -13,3 +13,9 @@ scrape_configs:
   - job_name: trino
     static_configs:
       - targets: ["trino-exporter:8000"]
+
+  # Serving API: request rate, latency histogram, and snapshot-cache hit ratio. Same target name
+  # resolves under both Compose (service name) and Kubernetes (Service DNS).
+  - job_name: payments-api
+    static_configs:
+      - targets: ["api:8000"]
