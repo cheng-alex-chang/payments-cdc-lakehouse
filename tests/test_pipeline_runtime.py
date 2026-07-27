@@ -832,6 +832,7 @@ def test_payments_pipeline_dag_has_expected_shape(monkeypatch: pytest.MonkeyPatc
     assert dag.task_ids == {
         "init_hdfs", "validate_connector", "validate_schema", "bronze_load",
         "silver_transform", "gold_transform", "publish_trino_tables", "validate_trino",
+        "maintain_iceberg",
     }
     assert dag.get_task("init_hdfs").downstream_task_ids == {"validate_connector"}
     assert dag.get_task("validate_connector").downstream_task_ids == {"validate_schema"}
@@ -840,6 +841,10 @@ def test_payments_pipeline_dag_has_expected_shape(monkeypatch: pytest.MonkeyPatc
     assert dag.get_task("silver_transform").downstream_task_ids == {"gold_transform"}
     assert dag.get_task("gold_transform").downstream_task_ids == {"publish_trino_tables"}
     assert dag.get_task("publish_trino_tables").downstream_task_ids == {"validate_trino"}
+    # Maintenance runs last, after validation: compaction rewrites files, so running it on an
+    # unvalidated load would only preserve bad data more efficiently.
+    assert dag.get_task("validate_trino").downstream_task_ids == {"maintain_iceberg"}
+    assert dag.get_task("maintain_iceberg").downstream_task_ids == set()
 
 
 # ---------------------------------------------------------------------------
@@ -864,7 +869,7 @@ def test_pipeline_table_contracts_are_consistent(monkeypatch: pytest.MonkeyPatch
 
 def _grafana_paths() -> tuple[Path, Path]:
     root = Path(__file__).resolve().parents[1]
-    dashboard = root / "config" / "grafana" / "dashboards" / "payments-demo-overview.json"
+    dashboard = root / "config" / "grafana" / "dashboards" / "pipeline-output.json"
     datasources = root / "config" / "grafana" / "provisioning" / "datasources" / "prometheus.yml"
     return dashboard, datasources
 
@@ -904,17 +909,24 @@ def test_payment_aggregate_panels_read_gold_via_trino() -> None:
     dashboard = json.loads(dashboard_path.read_text())
     by_title = {p["title"]: p for p in dashboard["panels"]}
 
+    # Matched by prefix: panel titles carry a parenthetical stating what each one validates
+    # (this dashboard is pipeline-output validation, not a business dashboard), and that wording
+    # should be free to change without breaking the datasource contract pinned here.
     gold_panels = [
         "Total Payments", "Gross Volume", "Authorization Rate",
-        "Gross Volume by Hour", "Payment Method Mix", "Gross Volume by Country",
+        "Volume by Hour", "Method Mix", "Volume by Country",
     ]
-    for title in gold_panels:
-        panel = by_title[title]
-        assert panel["datasource"]["uid"] == "payments-gold-trino", title
+    for prefix in gold_panels:
+        matches = [p for title, p in by_title.items() if title.startswith(prefix)]
+        assert len(matches) == 1, f"expected exactly one panel titled {prefix}*, got {len(matches)}"
+        panel = matches[0]
+        assert panel["datasource"]["uid"] == "payments-gold-trino", prefix
         for target in panel["targets"]:
-            assert target["datasource"]["uid"] == "payments-gold-trino", title
-            assert "payment_metrics_gold" in target["rawSql"], title
+            assert target["datasource"]["uid"] == "payments-gold-trino", prefix
+            assert "payment_metrics_gold" in target["rawSql"], prefix
 
     # Refunds are not in the lakehouse yet, so those panels stay on source Postgres.
-    for title in ("Refund Events", "Refunds Over Time"):
-        assert by_title[title]["datasource"]["uid"] == "payments-postgres", title
+    for prefix in ("Refund Events", "Refunds Over Time"):
+        matches = [p for title, p in by_title.items() if title.startswith(prefix)]
+        assert len(matches) == 1, prefix
+        assert matches[0]["datasource"]["uid"] == "payments-postgres", prefix

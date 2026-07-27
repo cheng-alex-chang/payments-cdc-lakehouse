@@ -212,18 +212,32 @@ services:
       - ./config/hadoop/core-site.xml:/opt/spark/conf/core-site.xml
       - ./config/hadoop/hdfs-site.xml:/opt/spark/conf/hdfs-site.xml
 
-  metabase:
-    image: metabase/metabase:v0.55.8
-    container_name: dp-metabase
+  api:
+    build:
+      context: .
+      dockerfile: config/api/Dockerfile
+    container_name: dp-api
     restart: unless-stopped
     depends_on:
-      - trino
+      trino:
+        # The API is a thin layer over Trino; starting before Trino can answer would just serve
+        # 503s from /v1/ready until it caught up.
+        condition: service_healthy
     ports:
-      - "3000:3000"
+      - "8000:8000"
     environment:
-      MB_DB_FILE: /metabase-data/metabase.db
-    volumes:
-      - metabase_data:/metabase-data
+      TRINO_HOST: trino
+      TRINO_PORT: "8080"
+      TRINO_USER: api
+      TRINO_CATALOG: iceberg
+      TRINO_SCHEMA: analytics
+    healthcheck:
+      # Liveness, not readiness: a Trino outage should not make Compose restart a healthy API.
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v1/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   statsd-exporter:
     image: prom/statsd-exporter:latest
@@ -391,7 +405,6 @@ volumes:
   namenode_data:
   datanode_data:
   metastore_db_data:
-  metabase_data:
   grafana_data:
   trino_data:
   kafka_data:

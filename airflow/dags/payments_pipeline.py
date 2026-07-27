@@ -71,4 +71,18 @@ with DAG(
         bash_command="python /opt/airflow/scripts/validate_trino.py",
     )
 
-    init_hdfs >> validate_connector >> validate_schema >> bronze_load >> silver_transform >> gold_transform >> publish_trino_tables >> validate_trino
+    # Compaction, snapshot expiry, and orphan cleanup. Bronze commits a snapshot per micro-batch,
+    # so without this the table accumulates small files and an unbounded manifest history -- which
+    # slows query *planning*, not just scanning. Runs last, and only once the data has been
+    # validated: maintenance rewrites files, and doing that to a bad load just preserves it more
+    # efficiently.
+    maintain_iceberg = BashOperator(
+        task_id="maintain_iceberg",
+        bash_command="python /opt/airflow/scripts/maintain_iceberg.py",
+        # Last in the chain deliberately: maintenance rewrites files, and doing that to a bad load
+        # only preserves it more efficiently. Placing it after validate_trino means it runs on
+        # data that has already reconciled.
+        retries=1,
+    )
+
+    init_hdfs >> validate_connector >> validate_schema >> bronze_load >> silver_transform >> gold_transform >> publish_trino_tables >> validate_trino >> maintain_iceberg
