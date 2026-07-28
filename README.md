@@ -277,20 +277,24 @@ kubectl exec -n data-pipeline deploy/airflow-scheduler -- \
 
 ## Demo Flow
 
-Written for **Docker Compose**, because it is the faster loop for a walkthrough. Everything here
-works identically on Kubernetes — only the way you reach into a container changes. `dp-*` is a
-Compose container name; on the cluster, address the workload instead:
+Written for **Docker Compose**, the faster loop for a walkthrough. Every step works on Kubernetes
+too — only the way you reach into a container changes. The same command, both runtimes:
 
-| Compose | Kubernetes |
-|---------|------------|
-| `docker exec dp-postgres …` | `kubectl exec -n data-pipeline postgres-0 -- …` |
-| `docker exec dp-kafka …` | `kubectl exec -n data-pipeline kafka-0 -- …` |
-| `docker exec dp-trino …` | `kubectl exec -n data-pipeline deploy/trino -- …` |
-| `docker exec dp-airflow-webserver …` | `kubectl exec -n data-pipeline deploy/airflow-scheduler -- …` |
+```bash
+# Compose
+docker exec dp-postgres psql -U dataeng -d payments -c "SELECT COUNT(*) FROM payments;"
 
-Postgres and Kafka are StatefulSets, so they are addressed as pods (`postgres-0`); Trino and
-Airflow are Deployments, so `deploy/<name>` picks a pod for you. Add `-it` to `kubectl exec` when
-running the Trino CLI, or it drops to a dumb terminal and prints a JLine warning.
+# Kubernetes
+kubectl exec -n data-pipeline postgres-0 -- psql -U dataeng -d payments -c "SELECT COUNT(*) FROM payments;"
+```
+
+Only the prefix changes. To translate any step below, swap the container name for its workload:
+
+- `dp-postgres` → `postgres-0` and `dp-kafka` → `kafka-0` — StatefulSets are addressed as pods
+- `dp-trino` → `deploy/trino` and `dp-airflow-webserver` → `deploy/airflow-scheduler` — Deployments let `deploy/<name>` pick a pod for you
+
+Add `-it` to `kubectl exec` when running the Trino CLI, or it drops to a dumb terminal and prints a
+JLine warning.
 
 Note that this is a *human* reaching into a container to inspect state. The pipeline itself never
 does: every Airflow task addresses services over HTTP by name, which is why the same DAG runs
