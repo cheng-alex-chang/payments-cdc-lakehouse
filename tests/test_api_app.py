@@ -341,3 +341,33 @@ def test_openapi_schema_documents_the_public_endpoints() -> None:
     assert "/v1/health" in paths
     # /metrics is Prometheus scrape surface, not part of the public contract.
     assert "/metrics" not in paths
+
+
+def test_console_is_served_from_the_api_root() -> None:
+    client, _, _ = _client()
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    # Same-origin relative paths: the page must not hard-code a host, or it breaks the moment it is
+    # reached through a port-forward or behind a gateway on a different address.
+    assert "/v1/metrics/hourly" in response.text
+    assert "http://localhost:8000" not in response.text
+
+
+def test_console_stays_out_of_the_machine_contract() -> None:
+    """The page is a consumer of the API, not part of its published surface."""
+    client, _, _ = _client()
+
+    assert "/" not in client.get("/openapi.json").json()["paths"]
+
+
+def test_console_uses_the_cursor_rather_than_offset_paging() -> None:
+    """The page exists partly to demonstrate keyset pagination; offset paging would undercut it."""
+    client, _, _ = _client()
+
+    body = client.get("/").text
+
+    assert "next_cursor" in body
+    assert "offset" not in body.lower()

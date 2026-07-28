@@ -19,7 +19,10 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Any
 
+from pathlib import Path
+
 from fastapi import Depends, FastAPI, HTTPException, Query, Response
+from fastapi.responses import HTMLResponse
 
 from api.src import metrics
 from api.src.cache import SnapshotCache
@@ -44,6 +47,10 @@ from api.src.trino_client import connect_from_env, run_query
 
 MAX_PAGE_SIZE = 1000
 DEFAULT_PAGE_SIZE = 100
+
+# Read once at import rather than per request: it is a fixed asset baked into the image, and
+# re-reading it on every load would put disk I/O in the hot path for no benefit.
+CONSOLE_HTML = (Path(__file__).resolve().parent / "console.html").read_text(encoding="utf-8")
 
 
 class GoldRepository:
@@ -237,6 +244,21 @@ def ready(repository: RepositoryDep) -> ReadyResponse:
     except Exception as exc:
         return ReadyResponse(status="degraded", trino_reachable=False, detail=str(exc)[:200])
     return ReadyResponse(status="ok", trino_reachable=True)
+
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+def console() -> HTMLResponse:
+    """A single-page consumer of this API, served from the API itself.
+
+    The platform had no reader for its own serving tier: Grafana queries Trino directly, and
+    Prometheus only scrapes /metrics. This is the thing the gold endpoints exist for -- an internal
+    ops view of volume and authorization rate, built entirely from /v1/metrics/*.
+
+    Served from this origin rather than as a separate site so it needs no CORS policy, no second
+    deployment, and no network egress. It is excluded from the OpenAPI schema for the same reason
+    /metrics is: the machine contract is the /v1 surface, not the page that happens to render it.
+    """
+    return HTMLResponse(CONSOLE_HTML)
 
 
 @app.get("/metrics", include_in_schema=False)

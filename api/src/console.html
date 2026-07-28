@@ -1,0 +1,282 @@
+<!doctype html>
+<!--
+  The consumer the serving tier existed for.
+
+  Everything below is fetched from this same origin at run time -- no build step, no CDN, no
+  framework. That is deliberate: the page has to work inside a cluster with no internet egress,
+  and it is meant to demonstrate the API's contract rather than front-end tooling.
+
+  Two details are load-bearing rather than cosmetic:
+
+  * gross_volume arrives as a JSON *string* because it is DECIMAL(18,2) in the warehouse. It is
+    printed exactly as received; Number() touches it only to size a bar, never to display a
+    figure. Formatting money through an IEEE double is the rounding this pipeline exists to avoid.
+  * "Load more" sends back next_cursor untouched. That is keyset pagination -- page 500 costs what
+    page 1 costs -- and it is why there is no page-number control anywhere on this page.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Payments Gold — Console</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #16191d; --muted: #6b7280;
+    --line: #e3e6ea; --accent: #2f6feb; --accent-soft: #e8f0fe; --good: #12805c;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1216; --panel: #161a20; --ink: #e6e9ee; --muted: #98a1ae;
+      --line: #262c35; --accent: #6f9cf5; --accent-soft: #1b2942; --good: #3fbf95;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 1140px; margin: 0 auto; padding: 28px 20px 56px; }
+  header { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-bottom: 4px; }
+  h1 { font-size: 19px; margin: 0; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 13px; margin: 0 0 22px; }
+  .sub code { font-family: var(--mono); font-size: 12px; }
+  .pill {
+    font-family: var(--mono); font-size: 11px; padding: 3px 9px; border-radius: 999px;
+    background: var(--accent-soft); color: var(--accent); white-space: nowrap;
+  }
+  .pill.ok { background: transparent; color: var(--good); border: 1px solid var(--good); }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+  form { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; padding: 14px; margin-bottom: 18px; }
+  label { display: flex; flex-direction: column; gap: 5px; font-size: 11px; color: var(--muted);
+          text-transform: uppercase; letter-spacing: 0.06em; }
+  input, select {
+    font: inherit; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px;
+    background: var(--bg); color: var(--ink); min-width: 150px;
+  }
+  button {
+    font: inherit; font-weight: 550; padding: 8px 16px; border: 0; border-radius: 6px;
+    background: var(--accent); color: #fff; cursor: pointer;
+  }
+  button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--line); }
+  button:disabled { opacity: 0.45; cursor: default; }
+  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 18px; }
+  @media (max-width: 760px) { .tiles { grid-template-columns: repeat(2, 1fr); } }
+  .tile { padding: 14px 16px; }
+  .tile .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+  .tile .v { font-size: 23px; font-weight: 600; margin-top: 5px; letter-spacing: -0.02em;
+             font-variant-numeric: tabular-nums; }
+  .chart { padding: 16px; margin-bottom: 18px; }
+  .chart h2, .tablewrap h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em;
+                             color: var(--muted); margin: 0 0 12px; font-weight: 600; }
+  svg { display: block; width: 100%; height: 168px; }
+  .tablewrap { padding: 16px; overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+       color: var(--muted); border-bottom: 1px solid var(--line); padding: 0 10px 8px; font-weight: 600; }
+  td { padding: 7px 10px; border-bottom: 1px solid var(--line); }
+  td.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  tr:last-child td { border-bottom: 0; }
+  .foot { display: flex; align-items: center; gap: 12px; margin-top: 14px; color: var(--muted); font-size: 12px; }
+  .err { color: #c0392b; padding: 14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Payments Gold — Console</h1>
+    <span class="pill" id="snapshot">snapshot —</span>
+    <span class="pill ok" id="ready">checking…</span>
+  </header>
+  <p class="sub">
+    Reads <code>iceberg.analytics.payment_metrics_gold</code> through this API only — no direct
+    warehouse access, no SQL in the browser.
+  </p>
+
+  <form class="panel" id="filters">
+    <label>Country
+      <select name="country_code" id="country"><option value="">All</option></select>
+    </label>
+    <label>Method
+      <select name="payment_method" id="method"><option value="">All</option></select>
+    </label>
+    <label>From <input type="datetime-local" name="start" id="start"></label>
+    <label>To <input type="datetime-local" name="end" id="end"></label>
+    <button type="submit">Apply</button>
+    <button type="button" class="ghost" id="reset">Reset</button>
+  </form>
+
+  <div class="tiles">
+    <div class="panel tile"><div class="k">Payments</div><div class="v" id="t-count">—</div></div>
+    <div class="panel tile"><div class="k">Gross volume</div><div class="v" id="t-volume">—</div></div>
+    <div class="panel tile"><div class="k">Auth rate</div><div class="v" id="t-auth">—</div></div>
+    <div class="panel tile"><div class="k">Hourly buckets</div><div class="v" id="t-buckets">—</div></div>
+  </div>
+
+  <div class="panel chart">
+    <h2>Gross volume by hour — current page</h2>
+    <svg id="chart" viewBox="0 0 1000 168" preserveAspectRatio="none" role="img"
+         aria-label="Gross volume by hour"></svg>
+  </div>
+
+  <div class="panel tablewrap">
+    <h2>Hourly rows</h2>
+    <table>
+      <thead><tr>
+        <th>Hour (UTC)</th><th>Country</th><th>Method</th>
+        <th class="num">Payments</th><th class="num">Gross volume</th><th class="num">Auth rate</th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div class="foot">
+      <button class="ghost" id="more" disabled>Load more</button>
+      <span id="status">—</span>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const rowsEl = $("rows");
+  let cursor = null, loaded = 0, page = [];
+
+  const int = (n) => Number(n).toLocaleString("en-US");
+  // gross_volume is a string on the wire; group its digits without ever parsing it as a float.
+  const money = (s) => {
+    const [whole, frac = "00"] = String(s).split(".");
+    const sign = whole.startsWith("-") ? "-" : "";
+    const digits = sign ? whole.slice(1) : whole;
+    return sign + "$" + digits.replace(/\B(?=(\d{3})+(?!\d))/g, ",") + "." + frac;
+  };
+  const pct = (v) => (v === null || v === undefined ? "—" : (v * 100).toFixed(1) + "%");
+
+  function params(extra) {
+    const q = new URLSearchParams();
+    for (const [k, v] of new FormData($("filters"))) if (v) q.set(k, v);
+    for (const [k, v] of Object.entries(extra || {})) if (v) q.set(k, v);
+    return q;
+  }
+
+  function drawChart(rows) {
+    const svg = $("chart");
+    svg.innerHTML = "";
+    if (!rows.length) return;
+    // One bar per hour, summing the country/method rows that share it.
+    const byHour = new Map();
+    for (const r of rows) {
+      byHour.set(r.payment_hour, (byHour.get(r.payment_hour) || 0) + Number(r.gross_volume));
+    }
+    const vals = [...byHour.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+    const max = Math.max(...vals.map((v) => v[1])) || 1;
+    const W = 1000, H = 168, gap = vals.length > 120 ? 0 : 1;
+    const bw = W / vals.length;
+    const ns = "http://www.w3.org/2000/svg";
+    vals.forEach(([hour, v], i) => {
+      const h = Math.max(1, (v / max) * (H - 8));
+      const rect = document.createElementNS(ns, "rect");
+      rect.setAttribute("x", (i * bw).toFixed(2));
+      rect.setAttribute("y", (H - h).toFixed(2));
+      rect.setAttribute("width", Math.max(0.5, bw - gap).toFixed(2));
+      rect.setAttribute("height", h.toFixed(2));
+      rect.setAttribute("fill", "var(--accent)");
+      rect.setAttribute("opacity", "0.85");
+      const t = document.createElementNS(ns, "title");
+      t.textContent = hour.replace("T", " ").slice(0, 16) + " — " + money(v.toFixed(2));
+      rect.appendChild(t);
+      svg.appendChild(rect);
+    });
+  }
+
+  function appendRows(rows) {
+    for (const r of rows) {
+      const tr = document.createElement("tr");
+      const cells = [
+        [r.payment_hour.replace("T", " ").slice(0, 16), ""],
+        [r.country_code, ""],
+        [r.payment_method, ""],
+        [int(r.payment_count), "num"],
+        [money(r.gross_volume), "num"],
+        [pct(r.auth_rate), "num"],
+      ];
+      for (const [text, cls] of cells) {
+        const td = document.createElement("td");
+        if (cls) td.className = cls;
+        td.textContent = text;
+        tr.appendChild(td);
+      }
+      rowsEl.appendChild(tr);
+    }
+  }
+
+  async function load(reset) {
+    if (reset) { cursor = null; loaded = 0; page = []; rowsEl.innerHTML = ""; }
+    $("more").disabled = true;
+    $("status").textContent = "loading…";
+    const started = performance.now();
+    try {
+      const q = params({ limit: 200, cursor });
+      const res = await fetch("/v1/metrics/hourly?" + q.toString());
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const body = await res.json();
+      page = page.concat(body.data);
+      appendRows(body.data);
+      drawChart(page);
+      loaded += body.data.length;
+      cursor = body.next_cursor;
+      $("more").disabled = !cursor;
+      $("snapshot").textContent = "snapshot " + (body.snapshot_id || "—");
+      const ms = Math.round(performance.now() - started);
+      $("status").textContent = loaded + " rows" + (cursor ? " · more available" : " · end of results")
+        + " · " + ms + " ms";
+      if (reset) await loadSummary(q);
+    } catch (err) {
+      $("status").textContent = "error: " + err.message;
+    }
+  }
+
+  async function loadSummary() {
+    const res = await fetch("/v1/metrics/summary?" + params().toString());
+    if (!res.ok) return;
+    const s = await res.json();
+    $("t-count").textContent = int(s.payment_count);
+    $("t-volume").textContent = money(s.gross_volume);
+    $("t-auth").textContent = pct(s.auth_rate);
+    $("t-buckets").textContent = int(s.bucket_count);
+  }
+
+  async function bootstrap() {
+    try {
+      const r = await fetch("/v1/ready");
+      const b = await r.json();
+      $("ready").textContent = b.trino_reachable ? "trino reachable" : "degraded";
+    } catch { $("ready").textContent = "unreachable"; }
+
+    // Populate the filter dropdowns from one page of live data rather than a hard-coded list, so
+    // they cannot drift from what the warehouse actually holds.
+    try {
+      const res = await fetch("/v1/metrics/hourly?limit=1000");
+      const body = await res.json();
+      const fill = (el, key) => {
+        for (const v of [...new Set(body.data.map((r) => r[key]))].sort()) {
+          const o = document.createElement("option");
+          o.value = o.textContent = v;
+          el.appendChild(o);
+        }
+      };
+      fill($("country"), "country_code");
+      fill($("method"), "payment_method");
+    } catch { /* filters stay on "All" */ }
+
+    load(true);
+  }
+
+  $("filters").addEventListener("submit", (e) => { e.preventDefault(); load(true); });
+  $("reset").addEventListener("click", () => { $("filters").reset(); load(true); });
+  $("more").addEventListener("click", () => load(false));
+  bootstrap();
+})();
+</script>
+</body>
+</html>

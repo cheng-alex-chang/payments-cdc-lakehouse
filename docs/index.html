@@ -189,9 +189,10 @@ curl 'http://localhost:8000/v1/metrics/hourly?country_code=NL&amp;limit=5'
 curl 'http://localhost:8000/v1/metrics/summary'
 <span class="c">→ {"bucket_count":8764,"payment_count":50004,
    "gross_volume":"13123382.74","auth_rate":0.375,
-   "snapshot_id":"1115647747148086969"}</span></pre>
-      <p class="caption">Live against the Kubernetes cluster — the same 50,004 the Trino reconciliation reports.</p>
+   "snapshot_id":"6548357249319602506"}</span></pre>
+      <p class="caption">Live against the Kubernetes cluster — the same 50,004 the Trino reconciliation reports, and the same snapshot id shown in the console screenshot below.</p>
     </div>
+    <p class="lead">The API serves its own consumer at <code>/</code> — an ops console built only from these endpoints, so the tier has an actual reader rather than just a contract. <a href="#shots">See it below.</a></p>
     <p class="lead">Four decisions carry the design, and each has a reason worth defending:</p>
     <ul class="why">
       <li><b>Filters compile to SQL, not Python.</b> Gold is partitioned by <code>days(payment_hour)</code>, so a bounded range lets Iceberg prune files before anything is read. Measured: a filtered query is <em>faster</em> than an unfiltered one — 35&nbsp;ms against 63&nbsp;ms p50 — which is the pushdown working.</li>
@@ -202,7 +203,7 @@ curl 'http://localhost:8000/v1/metrics/summary'
     <p class="caption" style="margin-top:14px;">The whole suite runs with no Trino driver installed and no warehouse reachable — the driver is imported lazily, so tests inject a fake connection underneath the real repository. Keeping <code>trino</code> out of CI is what proves that still holds.</p>
   </section>
 
-  <section>
+  <section id="shots">
     <h2>The pipelines in action</h2>
     <p class="hint">Click any screenshot to open it full size.</p>
     <div class="shots">
@@ -211,6 +212,12 @@ curl 'http://localhost:8000/v1/metrics/summary'
           <img src="images/airflow-payments-pipeline.png" alt="Airflow graph view of a successful payments_pipeline run on Kubernetes — nine tasks green, with bronze_load, silver_transform and gold_transform running as KubernetesPodOperator and the rest as BashOperator">
         </a>
         <p class="caption"><strong>Airflow</strong> — a full run on the cluster. The three Spark tasks are <code>KubernetesPodOperator</code> pods; every other task talks HTTP to a service name that resolves under Compose and Kubernetes alike.</p>
+      </div>
+      <div class="card">
+        <a class="zoom" href="images/api-console.png" target="_blank" rel="noopener" aria-label="Open full-size image">
+          <img src="images/api-console.png" alt="The gold API's own console: 50,004 payments, $13,123,382.74 gross volume, 37.5% authorization rate and 8,764 hourly buckets, with a volume-by-hour chart and a cursor-paginated table of hourly rows by country and payment method">
+        </a>
+        <p class="caption"><strong>Gold API console</strong> — the consumer the serving tier exists for, served by the API itself and built only from <code>/v1/metrics/*</code>. The snapshot id in the header is the Iceberg version the cache is keyed on; <em>Load more</em> sends back the keyset cursor, which is why there are no page numbers.</p>
       </div>
       <div class="card">
         <a class="zoom" href="images/grafana-payments-demo-overview.png" target="_blank" rel="noopener" aria-label="Open full-size image">

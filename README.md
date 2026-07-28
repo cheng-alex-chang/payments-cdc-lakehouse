@@ -83,6 +83,18 @@ curl 'http://localhost:8000/v1/metrics/hourly?country_code=NL&limit=5'
 curl 'http://localhost:8000/v1/metrics/summary?start=2026-03-01T00:00:00'
 ```
 
+The API also serves its own consumer at `/` — an internal ops console built entirely from those
+endpoints, with no CORS policy, no second deployment, and no CDN. It is what the serving tier
+exists for: Grafana queries Trino directly and Prometheus only scrapes `/metrics`, so without it
+nothing actually *reads* the gold API.
+
+![The gold API console showing 50,004 payments, $13,123,382.74 gross volume, a 37.5% authorization rate across 8,764 hourly buckets, a volume-by-hour chart, and a cursor-paginated table of hourly rows](docs/images/api-console.png)
+
+Two details in that screenshot are load-bearing rather than decorative. The **snapshot id** in the
+header is the Iceberg version the response cache is keyed on — a new gold commit changes it and
+invalidates the cache exactly. **Load more** returns the keyset cursor untouched, which is why the
+page has no page numbers at all.
+
 Four decisions carry the design:
 
 - **Filters compile to SQL, not Python.** Gold is `PARTITIONED BY (days(payment_hour))`, so a bounded
@@ -197,7 +209,7 @@ Compose publishes fixed host ports, so the UIs are reachable directly:
 - Kafka Connect: `http://localhost:8083`
 - Trino: `http://localhost:8080`
 - HDFS NameNode UI: `http://localhost:9870`
-- Payments Gold API: `http://localhost:8000/docs`
+- Payments Gold API: `http://localhost:8000/` (console) · `/docs` (OpenAPI UI)
 - Prometheus: `http://localhost:9090`
 - Grafana: `http://localhost:3001`
 
