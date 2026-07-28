@@ -187,8 +187,8 @@ curl 'http://localhost:8000/v1/metrics/summary'
     <h2>The pipelines in action</h2>
     <div class="shots">
       <div class="card">
-        <img src="images/airflow-payments-pipeline.png" alt="Airflow DAG run for the payments CDC pipeline">
-        <p class="caption"><strong>Airflow</strong> — the CDC DAG: bronze → silver → gold with validation and alerting.</p>
+        <img src="images/airflow-payments-pipeline.png" alt="Airflow graph view of a successful payments_pipeline run on Kubernetes — nine tasks green, with bronze_load, silver_transform and gold_transform running as KubernetesPodOperator and the rest as BashOperator">
+        <p class="caption"><strong>Airflow</strong> — a full run on the cluster. The three Spark tasks are <code>KubernetesPodOperator</code> pods; every other task talks HTTP to a service name that resolves under Compose and Kubernetes alike.</p>
       </div>
       <div class="card">
         <img src="images/grafana-payments-demo-overview.png" alt="Grafana dashboard of payment volume, authorization rate, refunds and payment mix">

@@ -368,7 +368,7 @@ This project is easiest to understand when viewed from three angles:
 
 Airflow shows the pipeline running from source validation through bronze, silver, gold, and downstream validation.
 
-![Airflow DAG showing the payments CDC pipeline run](docs/images/airflow-payments-pipeline.png)
+![Airflow graph view of a successful payments_pipeline run on Kubernetes — nine tasks green, with bronze_load, silver_transform and gold_transform running as KubernetesPodOperator and the rest as BashOperator](docs/images/airflow-payments-pipeline.png)
 
 Grafana shows the seeded demo data as business-facing metrics, including volume, authorization rate, refunds, and payment method mix.
 
