@@ -277,6 +277,25 @@ kubectl exec -n data-pipeline deploy/airflow-scheduler -- \
 
 ## Demo Flow
 
+Written for **Docker Compose**, because it is the faster loop for a walkthrough. Everything here
+works identically on Kubernetes — only the way you reach into a container changes. `dp-*` is a
+Compose container name; on the cluster, address the workload instead:
+
+| Compose | Kubernetes |
+|---------|------------|
+| `docker exec dp-postgres …` | `kubectl exec -n data-pipeline postgres-0 -- …` |
+| `docker exec dp-kafka …` | `kubectl exec -n data-pipeline kafka-0 -- …` |
+| `docker exec dp-trino …` | `kubectl exec -n data-pipeline deploy/trino -- …` |
+| `docker exec dp-airflow-webserver …` | `kubectl exec -n data-pipeline deploy/airflow-scheduler -- …` |
+
+Postgres and Kafka are StatefulSets, so they are addressed as pods (`postgres-0`); Trino and
+Airflow are Deployments, so `deploy/<name>` picks a pod for you. Add `-it` to `kubectl exec` when
+running the Trino CLI, or it drops to a dumb terminal and prints a JLine warning.
+
+Note that this is a *human* reaching into a container to inspect state. The pipeline itself never
+does: every Airflow task addresses services over HTTP by name, which is why the same DAG runs
+unchanged in both runtimes.
+
 ### 1. Show the source data in Postgres
 
 ```bash
