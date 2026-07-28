@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 from xml.etree import ElementTree
@@ -761,3 +762,141 @@ def test_snowflake_dag_is_excluded_from_the_cluster() -> None:
     # snowflake_fx_etl.py imports SnowflakeOperator and snowflake_etl.src, neither of which is in
     # the cluster Airflow image. Shipping it would break scheduler DAG parsing outright.
     assert not any("snowflake_fx_etl" in path for path in _generator_file_paths())
+
+
+def _workloads_in_manifests() -> dict[str, set[str]]:
+    """Every Deployment and StatefulSet name declared under k8s/base, keyed by lowercase kind."""
+    found: dict[str, set[str]] = {"statefulset": set(), "deployment": set()}
+    for path in sorted(K8S_BASE.glob("*.yaml")):
+        for doc in yaml.safe_load_all(path.read_text(encoding="utf-8")):
+            if not doc:
+                continue
+            kind = doc.get("kind", "").lower()
+            if kind in found:
+                found[kind].add(doc["metadata"]["name"])
+    return found
+
+
+def _workloads_checked_by_verify_script() -> dict[str, set[str]]:
+    """The STATEFULSETS and DEPLOYMENTS bash arrays in scripts/k8s_verify.sh."""
+    text = (REPO_ROOT / "scripts" / "k8s_verify.sh").read_text(encoding="utf-8")
+    checked: dict[str, set[str]] = {}
+    for variable, kind in (("STATEFULSETS", "statefulset"), ("DEPLOYMENTS", "deployment")):
+        match = re.search(rf"^{variable}=\(([^)]*)\)", text, re.MULTILINE)
+        assert match, f"{variable} array not found in scripts/k8s_verify.sh"
+        checked[kind] = set(match.group(1).split())
+    return checked
+
+
+def test_verify_script_covers_every_workload() -> None:
+    # k8s_verify.sh drifted behind the manifests once already: it silently skipped the API, the
+    # Airflow scheduler, and Kafka, so it reported success on a cluster missing the tier that
+    # serves data and the one that orchestrates it. A hand-maintained list that must match another
+    # list stays correct only if something asserts the match.
+    manifests = _workloads_in_manifests()
+    checked = _workloads_checked_by_verify_script()
+
+    for kind in ("statefulset", "deployment"):
+        unverified = manifests[kind] - checked[kind]
+        assert not unverified, (
+            f"{kind}s in k8s/base but not checked by scripts/k8s_verify.sh: {sorted(unverified)}"
+        )
+        phantom = checked[kind] - manifests[kind]
+        assert not phantom, (
+            f"{kind}s checked by scripts/k8s_verify.sh but absent from k8s/base: {sorted(phantom)}"
+        )
+
+
+def test_verify_script_checks_readiness_not_mere_existence() -> None:
+    # `kubectl get deployment api` exits 0 while every pod is in CrashLoopBackOff, so the original
+    # existence-only script passed on a fully broken cluster.
+    text = (REPO_ROOT / "scripts" / "k8s_verify.sh").read_text(encoding="utf-8")
+    assert "rollout status" in text
+
+    # Strip comments first -- the script's own header quotes `kubectl get deployment api` while
+    # explaining why that check is worthless, and prose is not what this test is about.
+    commands = "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    )
+    for weak in ("get statefulset ", "get deployment "):
+        assert weak not in commands, f"existence-only check {weak!r} is back in k8s_verify.sh"
+
+
+def test_documented_port_forwards_match_service_ports() -> None:
+    """Every `kubectl port-forward` in docs/kubernetes.md must name a real Service port.
+
+    The first draft of that section published Airflow as `8088:8088`; the Service listens on 8080,
+    so every command copied from the docs would have failed. Prose that names a port is another
+    hand-maintained copy of the manifests, so it gets the same treatment as the verify script.
+    """
+    service_ports: dict[str, set[int]] = {}
+    for path in sorted(K8S_BASE.glob("*.yaml")):
+        for doc in yaml.safe_load_all(path.read_text(encoding="utf-8")):
+            if doc and doc.get("kind") == "Service":
+                name = doc["metadata"]["name"]
+                service_ports[name] = {port["port"] for port in doc["spec"]["ports"]}
+
+    doc_text = (REPO_ROOT / "docs" / "kubernetes.md").read_text(encoding="utf-8")
+    commands = re.findall(
+        r"port-forward\s+-n\s+data-pipeline\s+svc/(\S+)\s+(\d+):(\d+)", doc_text
+    )
+    assert commands, "no port-forward commands found in docs/kubernetes.md"
+
+    for service, _local, remote in commands:
+        assert service in service_ports, f"docs reference svc/{service}, which k8s/base does not define"
+        assert int(remote) in service_ports[service], (
+            f"docs forward svc/{service} to port {remote}, but that Service exposes "
+            f"{sorted(service_ports[service])}"
+        )
+
+
+def _seed_job() -> dict:
+    for doc in yaml.safe_load_all((K8S_BASE / "seed-demo-data.yaml").read_text(encoding="utf-8")):
+        if doc and doc.get("kind") == "Job" and doc["metadata"]["name"] == "seed-demo-data":
+            return doc
+    raise AssertionError("seed-demo-data Job not found")
+
+
+def test_seed_job_replays_the_same_configmap_the_database_mounts() -> None:
+    # The point of the Job is to reload the *real* seed. If it carried its own copy of the SQL --
+    # inline, or from a second ConfigMap -- it would be one more hand-maintained duplicate, and it
+    # would eventually seed something the database never contained.
+    job = _seed_job()
+    postgres = next(
+        doc
+        for doc in yaml.safe_load_all((K8S_BASE / "postgres.yaml").read_text(encoding="utf-8"))
+        if doc and doc.get("kind") == "StatefulSet"
+    )
+
+    def configmap_names(spec: dict) -> set[str]:
+        return {
+            volume["configMap"]["name"]
+            for volume in spec["template"]["spec"].get("volumes", [])
+            if "configMap" in volume
+        }
+
+    assert "postgres-init" in configmap_names(job["spec"])
+    assert configmap_names(job["spec"]) <= configmap_names(postgres["spec"]), (
+        "the seed Job must not mount config the source database does not"
+    )
+
+
+def test_seed_job_ships_suspended_and_fails_loudly() -> None:
+    job = _seed_job()
+    # Unsuspended, it would run at cluster creation -- racing the StatefulSet's own init.
+    assert job["spec"]["suspend"] is True
+
+    container = job["spec"]["template"]["spec"]["containers"][0]
+    script = container["command"][-1]
+    # Without ON_ERROR_STOP, psql prints errors and still exits 0, so a Job that seeded nothing
+    # would report Complete.
+    assert "ON_ERROR_STOP=1" in script
+    # Same image as the server, so psql cannot be a version behind the database it writes to.
+    assert container["image"] == postgres_image()
+
+
+def postgres_image() -> str:
+    for doc in yaml.safe_load_all((K8S_BASE / "postgres.yaml").read_text(encoding="utf-8")):
+        if doc and doc.get("kind") == "StatefulSet":
+            return doc["spec"]["template"]["spec"]["containers"][0]["image"]
+    raise AssertionError("postgres StatefulSet not found")

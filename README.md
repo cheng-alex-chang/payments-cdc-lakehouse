@@ -78,6 +78,7 @@ analyst to a SQL prompt and Grafana to a chart, but nothing hands results back t
 A read-only **FastAPI** tier closes that loop over the same gold table. See [`api/`](api/README.md).
 
 ```bash
+# On Kubernetes, first: kubectl port-forward -n data-pipeline svc/api 8000:8000
 curl 'http://localhost:8000/v1/metrics/hourly?country_code=NL&limit=5'
 curl 'http://localhost:8000/v1/metrics/summary?start=2026-03-01T00:00:00'
 ```
@@ -131,59 +132,24 @@ tests/                         Unit tests
 
 ## Run Locally
 
+Two paths. **Kubernetes** is the production-shaped one and the default recommendation; **Compose**
+is the faster edit-run loop. Both read the identical config files, so they cannot drift.
+
 ### Prerequisites
 
-- `Docker Desktop`
-- `docker compose`
+- `Docker Desktop` — the container runtime under both paths (`kind` runs its nodes as containers).
+  Allocate at least **12 GB** of memory; the full platform is 22 containers.
+- `kind` and `kubectl` — Kubernetes path only
 - `Python 3`
 
-### Start the platform
-
-```bash
-docker compose up -d
-```
-
-All long-running services use `restart: unless-stopped` and expose healthchecks (Kafka, NameNode, DataNode, Trino, Airflow, Postgres variants). Dependent services wait on `condition: service_healthy` before starting, so the stack self-recovers from individual container crashes without manual intervention.
-
-### Register or refresh the Debezium connector
-
-```bash
-bash scripts/register_connector.sh
-```
-
-### Main URLs
-
-- Airflow: `http://localhost:8088`
-- Kafka Connect: `http://localhost:8083`
-- Trino: `http://localhost:8080`
-- HDFS NameNode UI: `http://localhost:9870`
-- Payments Gold API: `http://localhost:8000/docs`
-- Prometheus: `http://localhost:9090`
-- Grafana: `http://localhost:3001`
-
-### Load richer demo data
-
-Fresh environments get the expanded demo seed automatically. If your containers and volumes already exist, reload the sample dataset into Postgres with:
-
-```bash
-python3 scripts/load_demo_data.py
-```
-
-Then trigger the Airflow DAG again so bronze, silver, and gold pick up the new CDC events.
-
-### Run tests
-
-```bash
-source .venv/bin/activate
-pytest --cov --cov-report=term-missing
-```
-
-## Kubernetes (production-shaped deployment)
+### Kubernetes (production-shaped)
 
 `scripts/k8s_up.sh` creates a local `kind` cluster and applies the Kustomize overlay, rendering the
 full platform: stateful databases, HDFS, Hive Metastore, Trino, Kafka/Connect, Spark job templates,
-Airflow, observability (including provisioned Grafana datasources and dashboards), and analytics
-UI workloads — 60 objects in total.
+Airflow, the gold serving API, and observability (including provisioned Grafana datasources and
+dashboards). `python3 scripts/validate_k8s_manifests.py` renders the overlay and prints the object
+count. Connector registration, the demo re-seed, and the Spark Jobs ship suspended, so they cannot
+fire before their dependencies are Ready.
 
 The ConfigMaps are generated from the repo's real config files rather than a copy kept in step by
 hand, so a Spark job or seed script edit reaches both runtimes at once. Those paths sit outside the
@@ -197,15 +163,69 @@ kubectl get statefulsets,pods,svc,pvc -n data-pipeline
 python3 scripts/validate_k8s_manifests.py
 ```
 
-Stop and remove the local cluster with:
+The cluster reserves no fixed host ports, so reach a UI with a port-forward — for example Airflow
+(it serves 8080 in the pod; 8088 keeps the Compose URL working):
 
 ```bash
-bash scripts/k8s_down.sh
+kubectl port-forward -n data-pipeline svc/airflow-webserver 8088:8080
 ```
 
-See [docs/kubernetes.md](docs/kubernetes.md) for the current Kubernetes scope, verification commands, and remaining runtime caveats.
+[docs/kubernetes.md](docs/kubernetes.md#reaching-a-ui) lists the command for every UI.
 
-The Kubernetes path has been verified end-to-end locally — Debezium connector registration, Bronze/Silver/Gold Spark Jobs, and Trino row-count validation all reconcile (bronze = silver = gold, currently ~50k payments over 12 months).
+Tear the cluster down with `bash scripts/k8s_down.sh`.
+
+See [docs/kubernetes.md](docs/kubernetes.md) for the full startup order, verification commands, and
+remaining runtime caveats.
+
+**Verified end-to-end on a live cluster:** Debezium connector registration, Airflow running all nine
+pipeline tasks natively (three of them as `KubernetesPodOperator` Spark pods), Trino reconciling
+bronze = silver = gold at 50,004 payments across 8,764 hourly buckets, and the gold API answering
+against that same data.
+
+### Docker Compose (fast inner loop)
+
+```bash
+docker compose up -d
+bash scripts/register_connector.sh   # Kubernetes does this with a Job instead
+```
+
+All long-running services use `restart: unless-stopped` and expose healthchecks (Kafka, NameNode, DataNode, Trino, Airflow, Postgres variants). Dependent services wait on `condition: service_healthy` before starting, so the stack self-recovers from individual container crashes without manual intervention.
+
+Compose publishes fixed host ports, so the UIs are reachable directly:
+
+- Airflow: `http://localhost:8088`
+- Kafka Connect: `http://localhost:8083`
+- Trino: `http://localhost:8080`
+- HDFS NameNode UI: `http://localhost:9870`
+- Payments Gold API: `http://localhost:8000/docs`
+- Prometheus: `http://localhost:9090`
+- Grafana: `http://localhost:3001`
+
+### Reload the demo data
+
+Both runtimes seed automatically on first start, when Postgres finds an empty data directory. To
+replay the seed into an environment that already exists:
+
+```bash
+# Kubernetes — a suspended Job that mounts the same postgres-init ConfigMap the database does
+kubectl patch job seed-demo-data -n data-pipeline -p '{"spec":{"suspend":false}}'
+kubectl wait --for=condition=complete job/seed-demo-data -n data-pipeline --timeout=120s
+
+# Compose
+python3 scripts/load_demo_data.py
+```
+
+Then trigger the Airflow DAG again so bronze, silver, and gold pick up the new CDC events. The seed
+is idempotent either way — `CREATE TABLE IF NOT EXISTS` plus `ON CONFLICT DO NOTHING`.
+
+## Run tests
+
+Runtime-independent — the suite needs no running services and no credentials.
+
+```bash
+source .venv/bin/activate
+pytest --cov --cov-report=term-missing
+```
 
 ## Databricks (Lakeflow Declarative Pipeline)
 
@@ -267,31 +287,31 @@ tests assert the Compose command and the Kubernetes Job templates still agree wi
 Manual trigger:
 
 ```bash
-# Compose
-docker exec dp-airflow-webserver airflow dags trigger payments_pipeline
-
 # Kubernetes
 kubectl exec -n data-pipeline deploy/airflow-scheduler -- \
   airflow dags trigger payments_pipeline -r manual-1
+
+# Compose
+docker exec dp-airflow-webserver airflow dags trigger payments_pipeline
 ```
 
 ## Demo Flow
 
-Written for **Docker Compose**, the faster loop for a walkthrough. Every step works on Kubernetes
-too — only the way you reach into a container changes. The same command, both runtimes:
+Written for **Kubernetes**. Every step works on Compose too — only the way you reach into a
+container changes. The same command, both runtimes:
 
 ```bash
-# Compose
-docker exec dp-postgres psql -U dataeng -d payments -c "SELECT COUNT(*) FROM payments;"
-
 # Kubernetes
 kubectl exec -n data-pipeline postgres-0 -- psql -U dataeng -d payments -c "SELECT COUNT(*) FROM payments;"
+
+# Compose
+docker exec dp-postgres psql -U dataeng -d payments -c "SELECT COUNT(*) FROM payments;"
 ```
 
-Only the prefix changes. To translate any step below, swap the container name for its workload:
+Only the prefix changes. To translate any step below, swap the workload for its container name:
 
-- `dp-postgres` → `postgres-0` and `dp-kafka` → `kafka-0` — StatefulSets are addressed as pods
-- `dp-trino` → `deploy/trino` and `dp-airflow-webserver` → `deploy/airflow-scheduler` — Deployments let `deploy/<name>` pick a pod for you
+- `postgres-0` → `dp-postgres` and `kafka-0` → `dp-kafka` — StatefulSets are addressed as pods, Compose containers by name
+- `deploy/trino` → `dp-trino` and `deploy/airflow-scheduler` → `dp-airflow-webserver` — `deploy/<name>` lets Kubernetes pick a pod for you
 
 Add `-it` to `kubectl exec` when running the Trino CLI, or it drops to a dumb terminal and prints a
 JLine warning.
@@ -303,19 +323,21 @@ unchanged in both runtimes.
 ### 1. Show the source data in Postgres
 
 ```bash
-docker exec dp-postgres psql -U dataeng -d payments -c "SELECT payment_id, amount, payment_status, updated_at FROM payments ORDER BY payment_id;"
+kubectl exec -n data-pipeline postgres-0 -- \
+  psql -U dataeng -d payments -c "SELECT payment_id, amount, payment_status, updated_at FROM payments ORDER BY payment_id;"
 ```
 
 ### 2. Change a source row
 
 ```bash
-docker exec dp-postgres psql -U dataeng -d payments -c "UPDATE payments SET amount = 149.99, payment_status = 'authorized', updated_at = NOW() WHERE payment_id = 1001;"
+kubectl exec -n data-pipeline postgres-0 -- \
+  psql -U dataeng -d payments -c "UPDATE payments SET amount = 149.99, payment_status = 'authorized', updated_at = NOW() WHERE payment_id = 1001;"
 ```
 
 ### 3. Show the CDC event in Kafka
 
 ```bash
-docker exec dp-kafka kafka-console-consumer \
+kubectl exec -n data-pipeline kafka-0 -- kafka-console-consumer \
   --bootstrap-server kafka:29092 \
   --topic cdc.public.payments \
   --from-beginning \
@@ -326,25 +348,29 @@ docker exec dp-kafka kafka-console-consumer \
 ### 4. Trigger the Airflow DAG
 
 ```bash
-docker exec dp-airflow-webserver airflow dags trigger payments_pipeline
+kubectl exec -n data-pipeline deploy/airflow-scheduler -- \
+  airflow dags trigger payments_pipeline -r demo-1
 ```
 
 ### 5. Confirm the DAG run
 
 ```bash
-docker exec dp-airflow-webserver airflow dags list-runs -d payments_pipeline
+kubectl exec -n data-pipeline deploy/airflow-scheduler -- \
+  airflow dags list-runs -d payments_pipeline
 ```
 
 ### 6. Query the silver table in Trino
 
 ```bash
-docker exec dp-trino trino --execute "SELECT payment_id, amount, payment_method, payment_status, created_at, updated_at FROM iceberg.analytics.payments_silver"
+kubectl exec -it -n data-pipeline deploy/trino -- \
+  trino --execute "SELECT payment_id, amount, payment_method, payment_status, created_at, updated_at FROM iceberg.analytics.payments_silver"
 ```
 
 ### 7. Query the gold table in Trino
 
 ```bash
-docker exec dp-trino trino --execute "SELECT * FROM iceberg.analytics.payment_metrics_gold ORDER BY payment_hour, country_code, payment_method"
+kubectl exec -it -n data-pipeline deploy/trino -- \
+  trino --execute "SELECT * FROM iceberg.analytics.payment_metrics_gold ORDER BY payment_hour, country_code, payment_method"
 ```
 
 ## Observability

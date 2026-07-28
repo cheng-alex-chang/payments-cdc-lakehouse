@@ -13,6 +13,7 @@ kind: Kustomization
 resources:
   - namespace.yaml
   - postgres.yaml
+  - seed-demo-data.yaml
   - metastore-db.yaml
   - hdfs.yaml
   - hive-metastore.yaml

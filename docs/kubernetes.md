@@ -14,7 +14,7 @@ The current Kubernetes path has a full local-platform manifest set:
 - Kustomize generates shared ConfigMaps and Secrets from the existing repo config files and local overlay values.
 - Kubernetes defines source Postgres, metastore database, HDFS NameNode/DataNode, Hive Metastore, Trino, Kafka (KRaft)/Kafka Connect, connector registration, Spark bronze/silver/gold job templates, Airflow, the gold serving API, and Prometheus/exporters/Grafana.
 - An `hdfs-init` Job prepares local warehouse and checkpoint directories for Spark writes.
-- Connector registration and Spark job manifests are suspended by default so they do not run before their dependencies are Ready.
+- Connector registration, the demo re-seed, and Spark job manifests are suspended by default so they do not run before their dependencies are Ready.
 
 ## One Source of Config
 
@@ -52,7 +52,24 @@ header comment in each explaining why:
 forked config tree, every referenced file must exist, `overrides/` must contain exactly these three
 files, and each must document its rationale. The drift cannot silently return.
 
-The kind cluster does not reserve application ports up front. As services are added, use `kubectl port-forward` for the specific UI or API you want to inspect.
+## Reaching a UI
+
+The kind cluster reserves no host ports, so each UI is reached with its own port-forward. Each
+command runs in the foreground until interrupted:
+
+```bash
+kubectl port-forward -n data-pipeline svc/airflow-webserver 8088:8080   # Airflow
+kubectl port-forward -n data-pipeline svc/trino 8080:8080               # Trino
+kubectl port-forward -n data-pipeline svc/api 8000:8000                 # Gold API (/docs)
+kubectl port-forward -n data-pipeline svc/prometheus 9090:9090          # Prometheus
+kubectl port-forward -n data-pipeline svc/grafana 3001:3000             # Grafana
+kubectl port-forward -n data-pipeline svc/namenode 9870:9870            # HDFS NameNode UI
+```
+
+The left-hand port matches the Compose URL in the [README](../README.md#docker-compose-fast-inner-loop)
+so the same bookmark works in both runtimes; the right-hand port is what the Service actually
+listens on. Two differ: Airflow serves 8080 in the pod (Compose publishes it as 8088, and 8080 is
+already Trino's), and Grafana serves 3000 (Compose publishes 3001).
 
 ## Runtime Status
 
@@ -62,7 +79,7 @@ The manifest set renders and is structurally validated with:
 python3 scripts/validate_k8s_manifests.py
 ```
 
-The manifest set renders and structurally validates clean (60 objects), and the Kubernetes path has
+That command prints the object count it validated. The manifest set renders and validates clean, and the Kubernetes path has
 been verified end to end on a local `kind` cluster running the *current* architecture — gold as
 `INSERT OVERWRITE` from silver, the full ~50k-row seed, and ConfigMaps generated from the repo's
 real files:
@@ -211,6 +228,18 @@ kubectl patch job spark-gold -n data-pipeline -p '{"spec":{"suspend":false}}'
 kubectl wait --for=condition=complete job/spark-gold -n data-pipeline --timeout=600s
 ```
 
+`seed-demo-data` is suspended for the same reason, but is not part of startup — the database seeds
+itself on an empty data directory. Unsuspend it only to replay the seed into a cluster that is
+already running:
+
+```bash
+kubectl patch job seed-demo-data -n data-pipeline -p '{"spec":{"suspend":false}}'
+kubectl wait --for=condition=complete job/seed-demo-data -n data-pipeline --timeout=120s
+```
+
+Kubernetes Jobs have immutable pod templates, so re-running it a second time needs
+`kubectl delete job seed-demo-data -n data-pipeline` first, then a re-apply.
+
 Validate the serving layer with:
 
 ```bash
@@ -228,23 +257,16 @@ kubectl exec -n data-pipeline deploy/trino -- \
 bash scripts/k8s_down.sh
 ```
 
-## Next Runtime Hardening Steps
+## Keeping This Page True
 
-The manifests exist for the full local stack and the manual runtime smoke path succeeds. Harden the operating workflow in this order:
+Every list on this page duplicates something that lives in the manifests, and a duplicate that
+nothing checks is how the last round of drift happened. So:
 
-1. Add dependency-aware readiness waits to `scripts/k8s_verify.sh`.
-2. Convert the suspended Debezium and Spark Jobs into explicit run commands or verification steps.
-3. Replace Docker-oriented Airflow helper scripts with Kubernetes-aware equivalents.
-4. Add service-specific port-forward examples for Airflow, Trino, the gold API, Prometheus, and Grafana.
-5. Move Spark jobs from local-mode Job templates toward Kubernetes-managed Spark driver/executor pods.
-
-The goal is for Kubernetes to mirror the existing Compose architecture first. After that, Spark jobs can move from local-mode Job templates to Kubernetes-managed Spark driver/executor pods.
-
-## Documentation Rules For New Manifests
-
-Keep this page accurate as the Kubernetes path grows:
-
-- List workloads under current scope only after the manifest exists and `bash scripts/k8s_up.sh` creates it.
-- Keep port-forward commands service-specific, because the kind cluster does not reserve fixed application ports.
-- Prefer dependency-focused verification steps over broad claims. For example, check that Hive Metastore can reach its database, Trino can query Iceberg metadata, Kafka Connect has the Debezium connector, and Airflow can trigger the same bronze/silver/gold sequence used locally.
-- Update [design.md](design.md) only when runtime behavior or limitations change, not for manifest inventory churn.
+- Add a workload here only after its manifest exists and `bash scripts/k8s_up.sh` creates it, and
+  add it to `scripts/k8s_verify.sh` in the same change — `tests/test_validate_k8s_manifests.py`
+  fails if the script and `k8s/base/` disagree, and if a port-forward above names a port the
+  Service does not expose.
+- Prefer dependency-focused verification over broad claims: that Hive Metastore reaches its
+  database, that Trino queries Iceberg metadata, that Kafka Connect holds the Debezium connector.
+- Update [design.md](design.md) when runtime behavior or a limitation changes, not for manifest
+  inventory churn.

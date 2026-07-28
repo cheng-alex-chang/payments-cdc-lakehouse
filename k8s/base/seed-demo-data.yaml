@@ -1,0 +1,88 @@
+# Re-seeds the demo dataset into an already-running source Postgres.
+#
+# The seed normally runs once, when the postgres image finds an empty data directory and executes
+# /docker-entrypoint-initdb.d. Reloading it afterwards needs a deliberate replay, and Compose has
+# scripts/load_demo_data.py for that -- which shells in with `docker exec dp-postgres` and so has
+# no Kubernetes equivalent. This Job is that equivalent, and it runs in-cluster under a
+# ServiceAccount instead of putting a human with cluster credentials into a database shell.
+#
+# It mounts the same `postgres-init` ConfigMap the StatefulSet does, so it replays the real seed
+# rather than a copy that could drift. Both files are safe to re-run: 001 is
+# CREATE TABLE IF NOT EXISTS and 002 ends every INSERT with ON CONFLICT DO NOTHING.
+#
+# Ships suspended, like register-postgres-cdc, so it cannot fire during cluster startup. Run it:
+#   kubectl patch job seed-demo-data -n data-pipeline -p '{"spec":{"suspend":false}}'
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: seed-demo-data
+  namespace: data-pipeline
+  labels:
+    app.kubernetes.io/name: seed-demo-data
+    app.kubernetes.io/component: source-database
+spec:
+  suspend: true
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: seed-demo-data
+        app.kubernetes.io/component: source-database
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: seed
+          # Same image as the StatefulSet, so psql matches the server version.
+          image: postgres:15
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 192Mi
+          env:
+            - name: PGHOST
+              value: postgres
+            - name: PGDATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: platform-secrets
+                  key: POSTGRES_DB
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: platform-secrets
+                  key: POSTGRES_USER
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: platform-secrets
+                  key: POSTGRES_PASSWORD
+          command:
+            - /bin/bash
+            - -euo
+            - pipefail
+            - -c
+            - |
+              # The Job is unsuspended by hand, so Postgres is normally already up; this only
+              # covers the case where it is mid-restart.
+              for _ in $(seq 1 30); do
+                pg_isready -q && break
+                sleep 2
+              done
+              pg_isready
+
+              # ON_ERROR_STOP makes psql exit non-zero on the first failed statement. Without it
+              # psql reports success after printing errors, and the Job would look complete.
+              for file in /etc/postgres-init/001_create_tables.sql /etc/postgres-init/002_seed_data.sql; do
+                echo "Applying ${file}"
+                psql -v ON_ERROR_STOP=1 -f "${file}"
+              done
+
+              psql -v ON_ERROR_STOP=1 -c "SELECT count(*) AS payments FROM payments;"
+          volumeMounts:
+            - name: postgres-init
+              mountPath: /etc/postgres-init
+      volumes:
+        - name: postgres-init
+          configMap:
+            name: postgres-init

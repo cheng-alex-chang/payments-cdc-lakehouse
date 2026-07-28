@@ -78,7 +78,13 @@ def find_missing_required(objects: list[K8sObject]) -> list[tuple[str, str]]:
 
 
 def find_unsuspended_template_jobs(objects: list[K8sObject]) -> list[str]:
-    template_jobs = {"register-postgres-cdc", "spark-bronze", "spark-silver", "spark-gold"}
+    template_jobs = {
+        "register-postgres-cdc",
+        "seed-demo-data",
+        "spark-bronze",
+        "spark-silver",
+        "spark-gold",
+    }
     return sorted(
         obj.name
         for obj in objects
