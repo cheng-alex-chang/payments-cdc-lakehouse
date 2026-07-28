@@ -305,32 +305,35 @@ _ICEBERG = "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1"
 _KAFKA   = "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.8"
 
 @pytest.mark.parametrize(
-    ("job_name", "expected_command"),
+    ("job_name", "script", "packages"),
     [
-        (
-            "bronze",
-            f"docker exec dp-spark /opt/spark/bin/spark-submit --master local[*] --packages {_KAFKA},{_ICEBERG} /opt/project/config/spark/jobs/bronze_from_kafka.py",
-        ),
-        (
-            "silver",
-            f"docker exec dp-spark /opt/spark/bin/spark-submit --master local[*] --packages {_ICEBERG} /opt/project/config/spark/jobs/silver_payments.py",
-        ),
-        (
-            "gold",
-            f"docker exec dp-spark /opt/spark/bin/spark-submit --master local[*] --packages {_ICEBERG} /opt/project/config/spark/jobs/gold_metrics.py",
-        ),
+        ("bronze", "bronze_from_kafka.py", f"{_KAFKA},{_ICEBERG}"),
+        ("silver", "silver_payments.py", _ICEBERG),
+        ("gold", "gold_metrics.py", _ICEBERG),
     ],
 )
 def test_run_local_job_dispatches_expected_command(
-    monkeypatch: pytest.MonkeyPatch, job_name: str, expected_command: str
+    monkeypatch: pytest.MonkeyPatch, job_name: str, script: str, packages: str
 ) -> None:
+    # This is the Compose submission path only; Kubernetes creates a pod per job instead. The
+    # bounded driver (local[2] + --driver-memory) is asserted here and cross-checked against the
+    # Kubernetes Job templates in tests/test_spark_jobs.py.
     from scripts import run_local_job
 
     recorded: list[tuple[str, bool, bool]] = []
     monkeypatch.setattr(run_local_job.subprocess, "run",
                         lambda command, shell, check: recorded.append((command, shell, check)))
     run_local_job.main(job_name)
-    assert recorded == [(expected_command, True, True)]
+
+    assert len(recorded) == 1
+    command, shell, check = recorded[0]
+    assert (shell, check) == (True, True)
+    assert command.startswith("docker exec dp-spark /opt/spark/bin/spark-submit")
+    assert "--master local[2]" in command
+    assert "--driver-memory 1g" in command
+    assert "local[*]" not in command
+    assert f"--packages {packages}" in command
+    assert command.endswith(f"/opt/project/config/spark/jobs/{script}")
 
 
 def test_run_local_job_rejects_unknown_job() -> None:
@@ -344,57 +347,145 @@ def test_run_local_job_rejects_unknown_job() -> None:
 # init_hdfs
 # ---------------------------------------------------------------------------
 
-def test_init_hdfs_runs_expected_mkdir(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_init_hdfs_creates_every_directory_the_pipeline_writes_to() -> None:
     from scripts import init_hdfs
 
-    recorded: list[str] = []
-    monkeypatch.setattr(init_hdfs, "run_hdfs", recorded.append)
+    # Bronze and silver checkpoint into HDFS, and the Iceberg warehouse lives there; a missing
+    # directory surfaces much later as a Spark write failure.
+    assert set(init_hdfs.DIRECTORIES) == {
+        "/data/bronze", "/data/silver", "/data/gold",
+        "/warehouse", "/warehouse/analytics.db",
+        "/checkpoints/bronze", "/checkpoints/silver",
+    }
+
+
+def test_init_hdfs_targets_the_namenode_by_service_name() -> None:
+    from scripts import init_hdfs
+
+    # "namenode" resolves as a Compose service name and a Kubernetes Service DNS name alike --
+    # the point of moving off `docker exec dp-namenode`.
+    url = init_hdfs.mkdirs_url("/warehouse", env={})
+
+    assert url == "http://namenode:9870/webhdfs/v1/warehouse?op=MKDIRS&user.name=root"
+
+
+def test_init_hdfs_honours_environment_overrides() -> None:
+    from scripts import init_hdfs
+
+    url = init_hdfs.mkdirs_url(
+        "/data/bronze",
+        env={"HDFS_NAMENODE_HOST": "localhost", "HDFS_NAMENODE_HTTP_PORT": "19870"},
+    )
+
+    assert url.startswith("http://localhost:19870/webhdfs/v1/data/bronze?op=MKDIRS")
+
+
+def test_init_hdfs_rejects_a_non_numeric_port() -> None:
+    from scripts import init_hdfs
+
+    with pytest.raises(ValueError, match="HDFS_NAMENODE_HTTP_PORT"):
+        init_hdfs.mkdirs_url("/warehouse", env={"HDFS_NAMENODE_HTTP_PORT": "ninety-eight-seventy"})
+
+
+def test_init_hdfs_raises_on_a_webhdfs_remote_exception() -> None:
+    from scripts import init_hdfs
+
+    # WebHDFS reports failures in the body with HTTP 200, so a status check alone would pass over
+    # a directory that was never created.
+    payload = {
+        "RemoteException": {
+            "exception": "AccessControlException",
+            "message": "Permission denied: user=root",
+        }
+    }
+
+    with pytest.raises(RuntimeError, match="AccessControlException"):
+        init_hdfs.raise_for_webhdfs_error(payload, "/warehouse")
+
+
+def test_init_hdfs_raises_when_mkdirs_returns_false() -> None:
+    from scripts import init_hdfs
+
+    with pytest.raises(RuntimeError, match="returned false"):
+        init_hdfs.raise_for_webhdfs_error({"boolean": False}, "/warehouse")
+
+
+def test_init_hdfs_accepts_a_successful_mkdirs() -> None:
+    from scripts import init_hdfs
+
+    # MKDIRS is idempotent: an existing directory returns true, so retries are safe.
+    init_hdfs.raise_for_webhdfs_error({"boolean": True}, "/warehouse")
+
+
+def test_init_hdfs_puts_to_every_directory(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts import init_hdfs
+
+    calls: list[str] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None: return None
+        def json(self) -> dict: return {"boolean": True}
+
+    class FakeHttp:
+        def put(self, url: str, timeout: int) -> FakeResponse:
+            calls.append(url)
+            return FakeResponse()
+
+    monkeypatch.setattr(init_hdfs, "requests", FakeHttp())
     init_hdfs.main()
 
-    assert recorded == [
-        "-mkdir -p "
-        "/data/bronze /data/silver /data/gold "
-        "/warehouse /warehouse/analytics.db "
-        "/checkpoints/bronze /checkpoints/silver"
-    ]
+    assert len(calls) == len(init_hdfs.DIRECTORIES)
+    assert all("op=MKDIRS" in url for url in calls)
 
 
-def test_init_hdfs_run_hdfs_invokes_subprocess(monkeypatch: pytest.MonkeyPatch) -> None:
-    from scripts import init_hdfs
+def test_init_hdfs_does_not_shell_into_a_compose_container() -> None:
+    source = (Path(__file__).resolve().parents[1] / "scripts" / "init_hdfs.py").read_text()
 
-    recorded: list[tuple[str, bool, bool]] = []
-    monkeypatch.setattr(init_hdfs.subprocess, "run",
-                        lambda command, shell, check: recorded.append((command, shell, check)))
-    init_hdfs.run_hdfs("-ls /data")
-    assert recorded == [("docker exec dp-namenode hdfs dfs -ls /data", True, True)]
+    assert "docker exec" not in source
+    assert "dp-namenode" not in source
 
 
 # ---------------------------------------------------------------------------
 # trino scripts
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize(
-    ("module_name", "expected_command"),
-    [
-        (
-            "scripts.publish_trino_tables",
-            'docker exec dp-trino trino --execute "SHOW TABLES IN iceberg.analytics"',
-        ),
-        (
-            "scripts.validate_trino",
-            "docker exec dp-trino trino --file /opt/project/sql/trino/validation_queries.sql",
-        ),
-    ],
-)
-def test_trino_scripts_execute_expected_command(
-    monkeypatch: pytest.MonkeyPatch, module_name: str, expected_command: str
-) -> None:
-    module = importlib.import_module(module_name)
-    recorded: list[tuple[str, bool, bool]] = []
-    monkeypatch.setattr(module.subprocess, "run",
-                        lambda command, shell, check: recorded.append((command, shell, check)))
-    module.main()
-    assert recorded == [(expected_command, True, True)]
+def test_trino_scripts_do_not_shell_into_a_compose_container() -> None:
+    """These tasks must run unchanged under Compose and Kubernetes.
+
+    They used to invoke `docker exec dp-trino ...`, naming a container that exists in exactly one
+    runtime -- which is why the Kubernetes path drove its Spark jobs with `kubectl patch` instead
+    of through the DAG. They now speak Trino's HTTP protocol against a service name that resolves
+    in both.
+    """
+    root = Path(__file__).resolve().parents[1] / "scripts"
+    for name in ("publish_trino_tables.py", "validate_trino.py", "maintain_iceberg.py"):
+        source = (root / name).read_text(encoding="utf-8")
+
+        assert "docker exec" not in source, name
+        assert "dp-trino" not in source, name
+        assert "trino_http" in source, name
+
+
+def test_publish_trino_tables_fails_when_a_medallion_table_is_missing() -> None:
+    """The old version echoed SHOW TABLES and exited 0 regardless.
+
+    A missing gold table sailed through the DAG and surfaced much later as an empty dashboard.
+    """
+    from scripts import publish_trino_tables
+
+    rows = [["payments_bronze"], ["payments_silver"]]
+
+    assert publish_trino_tables.missing_tables(rows) == {"payment_metrics_gold"}
+    assert publish_trino_tables.missing_tables(rows + [["payment_metrics_gold"]]) == set()
+
+
+def test_publish_trino_tables_raises_on_missing_tables(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts import publish_trino_tables
+
+    monkeypatch.setattr(publish_trino_tables.trino_http, "run_statement", lambda _sql: [])
+
+    with pytest.raises(SystemExit, match="payment_metrics_gold"):
+        publish_trino_tables.main()
 
 
 # ---------------------------------------------------------------------------

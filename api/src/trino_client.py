@@ -10,9 +10,13 @@ from __future__ import annotations
 import os
 from typing import Any
 
+# TRINO_HTTP_PORT, not TRINO_PORT. Kubernetes injects Docker-link-style variables for every
+# Service in the namespace, so a Service named `trino` sets TRINO_PORT="tcp://<ip>:8080" in every
+# pod. Any name of the form <SERVICE>_PORT is effectively reserved; relying on an explicit env
+# entry to shadow it works but is a trap waiting for the next deployment that forgets to set it.
 DEFAULTS = {
-    "TRINO_HOST": "trino",
-    "TRINO_PORT": "8080",
+    "TRINO_HTTP_HOST": "trino",
+    "TRINO_HTTP_PORT": "8080",
     "TRINO_USER": "api",
     "TRINO_CATALOG": "iceberg",
     "TRINO_SCHEMA": "analytics",
@@ -27,12 +31,12 @@ def connection_settings(env: dict[str, str] | None = None) -> dict[str, Any]:
     source = os.environ if env is None else env
     settings = {key: source.get(key, default) for key, default in DEFAULTS.items()}
 
-    port = settings["TRINO_PORT"]
+    port = settings["TRINO_HTTP_PORT"]
     if not str(port).isdigit():
-        raise ValueError(f"TRINO_PORT must be numeric, got {port!r}")
+        raise ValueError(f"TRINO_HTTP_PORT must be numeric, got {port!r}")
 
     return {
-        "host": settings["TRINO_HOST"],
+        "host": settings["TRINO_HTTP_HOST"],
         "port": int(port),
         "user": settings["TRINO_USER"],
         "catalog": settings["TRINO_CATALOG"],

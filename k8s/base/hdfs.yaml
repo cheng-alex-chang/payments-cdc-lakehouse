@@ -48,14 +48,16 @@ spec:
       containers:
         - name: namenode
           image: apache/hadoop:3
-          # The NameNode holds the entire filesystem namespace in heap, so starving it takes HDFS
-          # down and every consumer (Hive Metastore, Spark, Trino) with it.
+          # The NameNode holds the entire filesystem namespace in heap -- every file, block, and
+          # Iceberg metadata object -- so it grows with the table count, not with data volume.
+          # At 1Gi it was OOM-killed mid-run once gold reached 8,764 hourly buckets, which takes
+          # HDFS down and every consumer (Hive Metastore, Spark, Trino) with it.
           resources:
             requests:
               cpu: 100m
-              memory: 512Mi
+              memory: 768Mi
             limits:
-              memory: 1Gi
+              memory: 1536Mi
           command:
             - /bin/bash
             - -lc
@@ -161,12 +163,14 @@ spec:
       containers:
         - name: datanode
           image: apache/hadoop:3
+          # Sized alongside the NameNode: the DataNode restarted ten times at the previous limit
+          # while Spark was writing, and a flapping DataNode fails reads even when writes look fine.
           resources:
             requests:
               cpu: 100m
-              memory: 512Mi
+              memory: 768Mi
             limits:
-              memory: 1Gi
+              memory: 1536Mi
           command:
             - hdfs
             - datanode

@@ -226,8 +226,8 @@ services:
     ports:
       - "8000:8000"
     environment:
-      TRINO_HOST: trino
-      TRINO_PORT: "8080"
+      TRINO_HTTP_HOST: trino
+      TRINO_HTTP_PORT: "8080"
       TRINO_USER: api
       TRINO_CATALOG: iceberg
       TRINO_SCHEMA: analytics

@@ -16,14 +16,19 @@ catalog. Running maintenance on a schedule is the fix.
 Order matters: optimize first (it writes new compacted files and a new snapshot), then expire old
 snapshots, then remove files no longer referenced by any live snapshot.
 
-The SQL builders are pure so the statements are unit-testable without a warehouse; execution
-follows the same `docker exec` convention as scripts/publish_trino_tables.py and
-scripts/validate_trino.py.
+The SQL builders are pure so the statements are unit-testable without a warehouse; execution goes
+over Trino's HTTP protocol, so the same task runs under Docker Compose and Kubernetes without a
+branch. See scripts/trino_http.py.
 """
 from __future__ import annotations
 
 import logging
-import subprocess
+
+# See publish_trino_tables.py: Airflow mounts these as loose files with no package parent.
+try:
+    from scripts import trino_http
+except ImportError:  # pragma: no cover - exercised in the Airflow container, not in tests
+    import trino_http
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
 LOGGER = logging.getLogger(__name__)
@@ -79,11 +84,7 @@ def maintenance_statements(
 
 
 def run_statement(statement: str) -> None:
-    subprocess.run(
-        f'docker exec dp-trino trino --execute "{statement}"',
-        shell=True,
-        check=True,
-    )
+    trino_http.run_statement(statement)
 
 
 def main() -> None:

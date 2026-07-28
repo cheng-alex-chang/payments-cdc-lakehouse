@@ -50,9 +50,9 @@ spec:
             - name: http
               containerPort: 8000
           env:
-            - name: TRINO_HOST
+            - name: TRINO_HTTP_HOST
               value: trino
-            - name: TRINO_PORT
+            - name: TRINO_HTTP_PORT
               value: "8080"
             - name: TRINO_USER
               value: api

@@ -5,7 +5,8 @@ from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.bash import BashOperator
 
-from alerts import notify_failure  # dags/ is on sys.path inside Airflow
+import spark_jobs  # dags/ is on sys.path inside Airflow
+from alerts import notify_failure
 
 default_args = {
     "owner": "data-eng",
@@ -46,20 +47,14 @@ with DAG(
         retries=0,
     )
 
-    bronze_load = BashOperator(
-        task_id="bronze_load",
-        bash_command="python /opt/airflow/scripts/run_local_job.py bronze",
-    )
-
-    silver_transform = BashOperator(
-        task_id="silver_transform",
-        bash_command="python /opt/airflow/scripts/run_local_job.py silver",
-    )
-
-    gold_transform = BashOperator(
-        task_id="gold_transform",
-        bash_command="python /opt/airflow/scripts/run_local_job.py gold",
-    )
+    # Under Kubernetes these become KubernetesPodOperator tasks that create a pod per job; under
+    # Compose they stay BashOperators that submit into the dp-spark container. Selected by the
+    # PIPELINE_RUNTIME env var -- see airflow/dags/spark_jobs.py. Everything else in this DAG is
+    # already runtime-neutral: the remaining tasks talk HTTP to service names that resolve in
+    # both.
+    bronze_load = spark_jobs.spark_task("bronze_load", "bronze")
+    silver_transform = spark_jobs.spark_task("silver_transform", "silver")
+    gold_transform = spark_jobs.spark_task("gold_transform", "gold")
 
     publish_trino_tables = BashOperator(
         task_id="publish_trino_tables",

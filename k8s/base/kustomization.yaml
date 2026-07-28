@@ -99,11 +99,15 @@ configMapGenerator:
     files:
       - payments_pipeline.py=../../airflow/dags/payments_pipeline.py
       - alerts.py=../../airflow/dags/alerts.py
+      - spark_jobs.py=../../airflow/dags/spark_jobs.py
   - name: pipeline-scripts
     namespace: data-pipeline
     files:
       - init_hdfs.py=../../scripts/init_hdfs.py
       - maintain_iceberg.py=../../scripts/maintain_iceberg.py
+      # Imported by publish_trino_tables, validate_trino, and maintain_iceberg. Shipping those
+      # three without this one leaves them importing a module that is not in the container.
+      - trino_http.py=../../scripts/trino_http.py
       - publish_trino_tables.py=../../scripts/publish_trino_tables.py
       - run_local_job.py=../../scripts/run_local_job.py
       - validate_connector.py=../../scripts/validate_connector.py

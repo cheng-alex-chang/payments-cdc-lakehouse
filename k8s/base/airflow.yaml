@@ -170,6 +170,9 @@ spec:
             - name: airflow-dags
               mountPath: /opt/airflow/dags/alerts.py
               subPath: alerts.py
+            - name: airflow-dags
+              mountPath: /opt/airflow/dags/spark_jobs.py
+              subPath: spark_jobs.py
             - name: pipeline-scripts
               mountPath: /opt/airflow/scripts
             - name: trino-validation-sql
@@ -251,12 +254,14 @@ spec:
       containers:
         - name: webserver
           image: local/data-pipeline-airflow:dev
+          # Restarted 60 times at 768Mi. The webserver also parses the DAG bag, so it carries the
+          # same provider import cost as the scheduler.
           resources:
             requests:
               cpu: 100m
-              memory: 384Mi
+              memory: 512Mi
             limits:
-              memory: 768Mi
+              memory: 1Gi
           imagePullPolicy: IfNotPresent
           command:
             - airflow
@@ -282,6 +287,16 @@ spec:
               value: "9125"
             - name: AIRFLOW__METRICS__STATSD_PREFIX
               value: airflow
+            # Selects KubernetesPodOperator over BashOperator for the three Spark tasks. Both the
+            # scheduler and the webserver parse the DAG, so both need it or the two disagree
+            # about the DAG's shape. Compose leaves it unset and gets the Bash path.
+            - name: PIPELINE_RUNTIME
+              value: kubernetes
+            # validate_schema.py reads this to reach the source database. Compose has always set
+            # it; Kubernetes did not, so the task failed with a bare KeyError the first time the
+            # DAG actually ran here. Parts come from platform-secrets via envFrom above.
+            - name: AIRFLOW_CONN_SOURCE_POSTGRES
+              value: postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/$(POSTGRES_DB)
           volumeMounts:
             # Mount each DAG file via subPath so Kubernetes materializes plain files, not a
             # ConfigMap directory. A directory mount carries the atomic-update `..data`
@@ -294,6 +309,9 @@ spec:
             - name: airflow-dags
               mountPath: /opt/airflow/dags/alerts.py
               subPath: alerts.py
+            - name: airflow-dags
+              mountPath: /opt/airflow/dags/spark_jobs.py
+              subPath: spark_jobs.py
             - name: pipeline-scripts
               mountPath: /opt/airflow/scripts
             - name: trino-validation-sql
@@ -359,12 +377,16 @@ spec:
       containers:
         - name: scheduler
           image: local/data-pipeline-airflow:dev
+          # The scheduler runs the DagFileProcessor, the executor, and -- since Spark submission
+          # moved to KubernetesPodOperator -- the cncf-kubernetes provider and its API client. At
+          # 768Mi it was OOM-killed, and a dead scheduler silently stops scheduling retries rather
+          # than failing loudly, so tasks just sit in up_for_retry forever.
           resources:
             requests:
-              cpu: 100m
-              memory: 384Mi
+              cpu: 200m
+              memory: 640Mi
             limits:
-              memory: 768Mi
+              memory: 1280Mi
           imagePullPolicy: IfNotPresent
           command:
             - airflow
@@ -387,6 +409,16 @@ spec:
               value: "9125"
             - name: AIRFLOW__METRICS__STATSD_PREFIX
               value: airflow
+            # Selects KubernetesPodOperator over BashOperator for the three Spark tasks. Both the
+            # scheduler and the webserver parse the DAG, so both need it or the two disagree
+            # about the DAG's shape. Compose leaves it unset and gets the Bash path.
+            - name: PIPELINE_RUNTIME
+              value: kubernetes
+            # validate_schema.py reads this to reach the source database. Compose has always set
+            # it; Kubernetes did not, so the task failed with a bare KeyError the first time the
+            # DAG actually ran here. Parts come from platform-secrets via envFrom above.
+            - name: AIRFLOW_CONN_SOURCE_POSTGRES
+              value: postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/$(POSTGRES_DB)
           volumeMounts:
             # Mount each DAG file via subPath so Kubernetes materializes plain files, not a
             # ConfigMap directory. A directory mount carries the atomic-update `..data`
@@ -399,6 +431,9 @@ spec:
             - name: airflow-dags
               mountPath: /opt/airflow/dags/alerts.py
               subPath: alerts.py
+            - name: airflow-dags
+              mountPath: /opt/airflow/dags/spark_jobs.py
+              subPath: spark_jobs.py
             - name: pipeline-scripts
               mountPath: /opt/airflow/scripts
             - name: trino-validation-sql

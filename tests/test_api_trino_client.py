@@ -42,8 +42,8 @@ def test_defaults_target_the_in_cluster_service() -> None:
 def test_environment_overrides_every_default() -> None:
     settings = trino_client.connection_settings(
         env={
-            "TRINO_HOST": "localhost",
-            "TRINO_PORT": "9999",
+            "TRINO_HTTP_HOST": "localhost",
+            "TRINO_HTTP_PORT": "9999",
             "TRINO_USER": "bench",
             "TRINO_CATALOG": "hive",
             "TRINO_SCHEMA": "staging",
@@ -59,8 +59,8 @@ def test_environment_overrides_every_default() -> None:
 
 def test_non_numeric_port_fails_loudly() -> None:
     # Better to fail at startup than to surface as a confusing driver error on first request.
-    with pytest.raises(ValueError, match="TRINO_PORT"):
-        trino_client.connection_settings(env={"TRINO_PORT": "eight-thousand"})
+    with pytest.raises(ValueError, match="TRINO_HTTP_PORT"):
+        trino_client.connection_settings(env={"TRINO_HTTP_PORT": "eight-thousand"})
 
 
 def test_run_query_binds_parameters_rather_than_formatting_them() -> None:

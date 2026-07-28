@@ -245,22 +245,34 @@ Everything is verifiable offline (mocked S3, fake Snowflake cursor, `terraform v
 
 ## Airflow Pipeline
 
-The main DAG is `airflow/dags/payments_pipeline.py`.
+The main DAG is `airflow/dags/payments_pipeline.py`, and it orchestrates **both** runtimes:
 
-It runs:
+1. `init_hdfs` — creates the warehouse and checkpoint directories over **WebHDFS**
+2. `validate_connector` — Debezium connector and task are `RUNNING`
+3. `validate_schema` — source schema matches what the pipeline expects
+4. `bronze_load` · `silver_transform` · `gold_transform` — the Spark medallion
+5. `publish_trino_tables` — the Iceberg tables are visible to Trino (and **fails** if one is missing)
+6. `validate_trino` — bronze = silver = gold reconciliation
+7. `maintain_iceberg` — compaction, snapshot expiry, orphan cleanup
 
-1. `init_hdfs`
-2. `validate_connector`
-3. `bronze_load`
-4. `silver_transform`
-5. `gold_transform`
-6. `publish_trino_tables`
-7. `validate_trino`
+Every task except the three Spark ones is **runtime-neutral**: it speaks HTTP to a service name
+(`trino:8080`, `namenode:9870`) that resolves as a Compose service name and a Kubernetes Service
+DNS name alike. No task shells into a container by name.
+
+Spark submission is the one thing that genuinely differs, because Compose has no cluster to
+schedule against. `airflow/dags/spark_jobs.py` returns a `KubernetesPodOperator` when
+`PIPELINE_RUNTIME=kubernetes` and a `BashOperator` otherwise; the job specs live in one place and
+tests assert the Compose command and the Kubernetes Job templates still agree with them.
 
 Manual trigger:
 
 ```bash
+# Compose
 docker exec dp-airflow-webserver airflow dags trigger payments_pipeline
+
+# Kubernetes
+kubectl exec -n data-pipeline deploy/airflow-scheduler -- \
+  airflow dags trigger payments_pipeline -r manual-1
 ```
 
 ## Demo Flow

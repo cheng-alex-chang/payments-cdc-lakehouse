@@ -25,6 +25,15 @@ rules:
       - list
       - watch
       - delete
+  # KubernetesPodOperator streams the driver's output back into the Airflow task log; without
+  # pods/log the task runs blind and a Spark failure surfaces only as a non-zero exit.
+  - apiGroups:
+      - ""
+    resources:
+      - pods/log
+    verbs:
+      - get
+      - list
   - apiGroups:
       - batch
     resources:

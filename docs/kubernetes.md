@@ -77,6 +77,42 @@ real files:
 - the gold serving API answering against that data (`/v1/metrics/summary` returning the same 50,004) with its snapshot-keyed cache registering hits
 - Grafana coming up with all three provisioned datasources — including the Trino *plugin* datasource — and both dashboards
 
+## Orchestration
+
+Airflow drives the pipeline on the cluster, not just on Compose. That distinction used to be
+hollow: every task was a `BashOperator` running a script that shelled into a Compose container by
+name (`docker exec dp-trino`, `docker exec dp-spark`, `docker exec dp-namenode`). Airflow on
+Kubernetes parsed the DAG but its tasks would have failed if triggered, so the cluster ran its
+Spark jobs through `kubectl patch` on suspended Job templates instead.
+
+Two changes closed that:
+
+**Most tasks became runtime-neutral rather than branching.** Trino work goes over Trino's HTTP
+protocol (`scripts/trino_http.py`) and HDFS setup over WebHDFS (`scripts/init_hdfs.py`). Both
+address services by name — `trino:8080`, `namenode:9870` — which resolves as a Compose service
+name and a Kubernetes Service DNS name alike. No branch, no duplicated logic; the same code runs
+in both.
+
+**Only Spark submission genuinely differs**, because Compose has no cluster to schedule against.
+`airflow/dags/spark_jobs.py` returns a `KubernetesPodOperator` when `PIPELINE_RUNTIME=kubernetes`
+and a `BashOperator` otherwise. The Kubernetes deployments set that variable; Compose leaves it
+unset. The job specs — master, driver memory, packages, script paths — live in one place, and
+`tests/test_spark_jobs.py` asserts the Compose command and the Job templates in
+`k8s/base/spark.yaml` still agree with them byte for byte.
+
+The pods run as the `spark` ServiceAccount; the `airflow` ServiceAccount is bound to the same
+`spark-job-runner` Role so it may create them. That Role also grants `pods/log`, which is what
+lets `KubernetesPodOperator` stream the Spark driver's output into the Airflow task log rather
+than reporting a bare non-zero exit.
+
+```bash
+kubectl exec -n data-pipeline deploy/airflow-scheduler -- \
+  airflow dags trigger payments_pipeline -r manual-1
+```
+
+What remains is Spark's own shape: jobs run as a single `local[2]` driver rather than a
+production-like driver/executor split. That is a scale limitation, not a runtime gap.
+
 ## Resource Declarations
 
 Every container declares a memory request and limit. This is not boilerplate: before it was added,
@@ -92,9 +128,15 @@ budget, so a newly added service cannot quietly make `scripts/k8s_up.sh` unsched
 
 ## Prerequisites
 
-- Docker Desktop
+- Docker Desktop, with **at least 12 GiB** allocated (Settings → Resources → Memory)
 - kind
 - kubectl
+
+The memory figure is a real requirement, not a suggestion. Steady-state requests come to ~5.8 GiB
+and a Spark job adds 1 GiB, so the platform needs roughly 6.8 GiB reserved before the kubelet,
+system pods, and the burst between each pod's request and its limit. At 8 GiB the NameNode is
+OOM-killed partway through a run and takes HDFS, Hive Metastore, Spark, and Trino down with it.
+`tests/test_validate_k8s_manifests.py` keeps the declared footprint inside that budget.
 
 ## Start the Local Cluster
 

@@ -612,10 +612,88 @@ def test_steady_state_footprint_fits_a_single_node_dev_cluster() -> None:
         if kind == "Job"
     )
 
-    # 6.5 GiB leaves roughly 1.25 GiB of a 7.75 GiB Docker VM for the kubelet and system pods.
-    assert steady + largest_job <= 6656, (
+    # 8 GiB against a 12 GiB Docker allocation, leaving headroom for the kubelet, system pods,
+    # and the burst between a pod's request and its limit. The full platform plus Spark does not
+    # fit in 8 GiB of Docker memory -- docs/kubernetes.md states the requirement.
+    assert steady + largest_job <= 8192, (
         f"steady state {steady} Mi + largest job {largest_job} Mi exceeds the dev-cluster budget"
     )
+
+
+def test_shipped_scripts_have_their_local_imports_shipped_too() -> None:
+    """A script in the ConfigMap is useless if the module it imports was left behind.
+
+    `trino_http.py` was omitted on the first pass, so publish_trino_tables, validate_trino, and
+    maintain_iceberg all reached the cluster importing a module that was not there -- invisible
+    to every test until the DAG genuinely ran on Kubernetes.
+    """
+    shipped = {
+        Path(path).name
+        for path in _generator_file_paths()
+        if path.startswith("../../scripts/")
+    }
+
+    assert shipped, "expected pipeline scripts in the ConfigMap"
+    for name in sorted(shipped):
+        source = (REPO_ROOT / "scripts" / name).read_text(encoding="utf-8")
+        for line in source.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("from scripts import "):
+                continue
+            for imported in stripped.removeprefix("from scripts import ").split(","):
+                module = f"{imported.strip()}.py"
+                assert module in shipped, f"{name} imports {module}, which is not in the ConfigMap"
+
+
+def test_no_config_env_var_collides_with_kubernetes_service_variables() -> None:
+    """Kubernetes reserves `<SERVICE>_PORT` in every pod's environment.
+
+    For each Service in the namespace, Kubernetes injects Docker-link-style variables --
+    `TRINO_PORT=tcp://10.96.15.110:8080`, `TRINO_SERVICE_HOST`, `TRINO_SERVICE_PORT`. Naming our
+    own config variable `TRINO_PORT` meant the pipeline read a URI where it expected a number.
+    Invisible under Compose, and it only failed once the DAG ran on the cluster.
+    """
+    services = {
+        doc["metadata"]["name"]
+        for path in sorted(K8S_BASE.glob("*.yaml"))
+        for doc in yaml.safe_load_all(path.read_text(encoding="utf-8"))
+        if doc and doc.get("kind") == "Service"
+    }
+    reserved = {f"{name.upper().replace('-', '_')}_PORT" for name in services}
+
+    sources = list((REPO_ROOT / "scripts").glob("*.py")) + list((REPO_ROOT / "api" / "src").glob("*.py"))
+    offenders = [
+        f"{path.name}:{name}"
+        for path in sources
+        for name in reserved
+        # Quoted usage means we read or set it as config; a bare mention in prose is fine.
+        if f'"{name}"' in path.read_text(encoding="utf-8")
+    ]
+
+    assert offenders == [], f"config env vars shadowed by Kubernetes Service variables: {offenders}"
+
+
+def test_airflow_connection_env_exists_in_both_runtimes() -> None:
+    """Every AIRFLOW_CONN_* the Compose Airflow defines must exist on Kubernetes too.
+
+    The DAG's tasks read these to reach the source database. Compose had
+    AIRFLOW_CONN_SOURCE_POSTGRES from the start and Kubernetes never did, so validate_schema
+    failed with a bare KeyError the first time the DAG genuinely ran on the cluster -- invisible
+    until then, because the Kubernetes path drove Spark through `kubectl patch` rather than
+    through Airflow.
+    """
+    compose = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    kubernetes = (K8S_BASE / "airflow.yaml").read_text(encoding="utf-8")
+
+    compose_conns = {
+        line.split(":")[0].strip()
+        for line in compose.splitlines()
+        if line.strip().startswith("AIRFLOW_CONN_")
+    }
+
+    assert compose_conns, "expected Compose to define at least one Airflow connection"
+    missing = [name for name in compose_conns if name not in kubernetes]
+    assert missing == [], f"Airflow connections defined only under Compose: {missing}"
 
 
 def test_spark_jobs_declare_memory_requests_and_limits() -> None:

@@ -63,10 +63,10 @@ Under Compose and Kubernetes the API starts with the rest of the platform. Stand
 
 ```bash
 pip install -r requirements-ci.txt -r requirements-api.txt
-TRINO_HOST=localhost uvicorn api.src.app:app --reload --port 8000
+TRINO_HTTP_HOST=localhost uvicorn api.src.app:app --reload --port 8000
 ```
 
-Configuration is environment-only: `TRINO_HOST`, `TRINO_PORT`, `TRINO_USER`, `TRINO_CATALOG`,
+Configuration is environment-only: `TRINO_HTTP_HOST`, `TRINO_HTTP_PORT`, `TRINO_USER`, `TRINO_CATALOG`,
 `TRINO_SCHEMA` (see `api/src/trino_client.py` for defaults).
 
 ## Tests
