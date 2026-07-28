@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Payments Data Platform — CDC lakehouse + Snowflake ELT, scale-tested to ~1 TB</title>
-<meta name="description" content="A dual-pipeline payments data platform: a replay-safe streaming CDC lakehouse (Debezium, Kafka, Spark, Iceberg, Trino) and a batch Snowflake ELT with a dbt star schema, scale-tested at 4.2 billion rows / ~1 TB.">
+<title>Payments Data Platform — CDC lakehouse, Snowflake ELT, and a serving API</title>
+<meta name="description" content="A three-tier payments data platform: a replay-safe streaming CDC lakehouse (Debezium, Kafka, Spark, Iceberg, Trino), a batch Snowflake ELT with a dbt star schema scale-tested at 4.2 billion rows / ~1 TB, and a FastAPI serving tier over the gold table. Kubernetes-native orchestration.">
 <style>
   :root {
     --ink: #0f172a;
@@ -41,7 +41,8 @@
 
   /* numbers band */
   .numbers { border-bottom: 1px solid var(--line); background: var(--panel); }
-  .numbers .wrap { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; padding: 28px 24px; }
+  /* Six stats: 6 across on desktop, then 3+3, then 2+2+2 -- never an orphaned last cell. */
+  .numbers .wrap { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; padding: 28px 24px; }
   .num { text-align: center; padding: 8px 4px; }
   .num b { display: block; color: var(--ink); font-size: 1.45rem; letter-spacing: -0.01em; }
   .num span { font-size: 0.82rem; color: var(--muted); }
@@ -59,6 +60,18 @@
   .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
   .shots { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
 
+  /* code */
+  pre {
+    background: var(--ink); color: #e2e8f0; border-radius: 10px; padding: 14px 16px;
+    overflow-x: auto; font-size: 0.85rem; line-height: 1.55;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  pre .c { color: #94a3b8; }
+  .why { list-style: none; margin: 4px 0 0; }
+  .why li { padding: 10px 0; border-top: 1px solid var(--line); }
+  .why li:first-child { border-top: 0; }
+  .why b { color: var(--ink); }
+
   /* chips */
   .chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0 8px; }
   .chip {
@@ -69,6 +82,9 @@
   footer { margin-top: 56px; border-top: 1px solid var(--line); padding: 28px 0 40px;
            font-size: 0.9rem; color: var(--muted); }
 
+  @media (max-width: 940px) {
+    .numbers .wrap { grid-template-columns: repeat(3, 1fr); }
+  }
   @media (max-width: 700px) {
     .hero h1 { font-size: 1.7rem; }
     .numbers .wrap { grid-template-columns: repeat(2, 1fr); }
@@ -81,11 +97,12 @@
 <div class="hero">
   <div class="wrap">
     <h1>Payments Data Platform</h1>
-    <p class="tag">One payments domain, both dominant data paradigms: a <strong>replay-safe streaming CDC lakehouse</strong> and a <strong>batch Snowflake ELT</strong> with a Kimball star schema — <strong>scale-tested at 4.2&nbsp;billion rows / ~1&nbsp;TB</strong>.</p>
-    <p class="sub">Postgres → Debezium/Kafka → Spark → Iceberg/Trino for hourly operational analytics; Postgres + FX API → S3 → Snowflake → dbt for USD-normalized financials.</p>
+    <p class="tag">One payments domain, three tiers: a <strong>replay-safe streaming CDC lakehouse</strong>, a <strong>batch Snowflake ELT</strong> with a Kimball star schema <strong>scale-tested at 4.2&nbsp;billion rows / ~1&nbsp;TB</strong>, and a <strong>read-only API</strong> that serves the result back to applications.</p>
+    <p class="sub">Postgres → Debezium/Kafka → Spark → Iceberg/Trino for hourly operational analytics; Postgres + FX API → S3 → Snowflake → dbt for USD-normalized financials; FastAPI over gold for everything downstream. Orchestrated by Airflow on Kubernetes.</p>
     <div class="btns">
       <a class="btn primary" href="https://github.com/cheng-alex-chang/payments-data-platform">View on GitHub</a>
       <a class="btn ghost" href="https://github.com/cheng-alex-chang/payments-data-platform/blob/main/docs/scale-benchmark.md">1&nbsp;TB benchmark write-up</a>
+      <a class="btn ghost" href="https://github.com/cheng-alex-chang/payments-data-platform/blob/main/api/README.md">Serving API</a>
       <a class="btn ghost" href="./dbt-docs/">dbt lineage browser</a>
     </div>
   </div>
@@ -97,15 +114,16 @@
     <div class="num"><b>12/12</b><span>data-quality gates pass at full scale</span></div>
     <div class="num"><b>54×</b><span>dim_date build speedup — staging view&nbsp;→&nbsp;table</span></div>
     <div class="num"><b>5M</b><span>rows processed by a daily increment — not 4.2B</span></div>
-    <div class="num"><b>50,004 = 50,004</b><span>live S3&nbsp;→&nbsp;Snowflake reconciliation</span></div>
+    <div class="num"><b>50,004</b><span>bronze&nbsp;=&nbsp;silver&nbsp;=&nbsp;gold, reconciled on Kubernetes</span></div>
+    <div class="num"><b>120&nbsp;ms</b><span>p99 on the filtered gold API endpoint</span></div>
   </div>
 </div>
 
 <div class="wrap">
 
   <section>
-    <h2>Architecture — two pipelines, two jobs</h2>
-    <p class="lead">A shared Postgres payments source feeds both tiers. The <strong>streaming lakehouse</strong> proves change-data-capture correctness: every insert, update, and delete replays safely into Iceberg through checkpointed Spark jobs. The <strong>batch warehouse</strong> proves analytical modeling: incremental extraction, raw VARIANT landing, and a tested dbt star schema.</p>
+    <h2>Architecture — two pipelines, two jobs, one API</h2>
+    <p class="lead">A shared Postgres payments source feeds both tiers. The <strong>streaming lakehouse</strong> proves change-data-capture correctness: every insert, update, and delete replays safely into Iceberg through checkpointed Spark jobs. The <strong>batch warehouse</strong> proves analytical modeling: incremental extraction, raw VARIANT landing, and a tested dbt star schema. A <strong>serving API</strong> then closes the loop, handing the curated result back to applications.</p>
     <div class="card">
       <img src="images/architecture-overview.svg" alt="Platform architecture: Postgres feeding a streaming CDC lakehouse (Debezium, Kafka, Spark, Iceberg, Trino) and a batch Snowflake warehouse (S3, COPY INTO, dbt)">
       <p class="caption">The full platform: CDC lakehouse (top path) for hourly operational analytics, Snowflake ELT (bottom path) for monthly USD-normalized financials.</p>
@@ -142,6 +160,30 @@
   </section>
 
   <section>
+    <h2>Serving the result — a read-only API over gold</h2>
+    <p class="lead">The pipeline moves data inward: Postgres → CDC → Kafka → Spark → Iceberg → Trino. That gets an analyst to a SQL prompt, but nothing hands the result back to an application. A <strong>FastAPI</strong> tier closes that loop over the same gold Iceberg table.</p>
+    <div class="card">
+<pre><span class="c"># hourly metrics, filtered and cursor-paginated</span>
+curl 'http://localhost:8000/v1/metrics/hourly?country_code=NL&amp;limit=5'
+
+<span class="c"># roll-up totals for a window</span>
+curl 'http://localhost:8000/v1/metrics/summary'
+<span class="c">→ {"bucket_count":8764,"payment_count":50004,
+   "gross_volume":"13123382.74","auth_rate":0.375,
+   "snapshot_id":"1115647747148086969"}</span></pre>
+      <p class="caption">Live against the Kubernetes cluster — the same 50,004 the Trino reconciliation reports.</p>
+    </div>
+    <p class="lead">Four decisions carry the design, and each has a reason worth defending:</p>
+    <ul class="why">
+      <li><b>Filters compile to SQL, not Python.</b> Gold is partitioned by <code>days(payment_hour)</code>, so a bounded range lets Iceberg prune files before anything is read. Measured: a filtered query is <em>faster</em> than an unfiltered one — 35&nbsp;ms against 63&nbsp;ms p50 — which is the pushdown working.</li>
+      <li><b>Keyset pagination, not <code>OFFSET</code>.</b> <code>OFFSET</code> makes the engine produce and discard every skipped row, so page 500 costs five hundred pages of work. A cursor over <code>(payment_hour, country_code, payment_method)</code> costs the same on every page.</li>
+      <li><b>The cache is keyed on the Iceberg snapshot id, not a TTL.</b> A TTL guesses. Every <code>INSERT OVERWRITE</code> on gold commits a new snapshot, so keying entries on it makes invalidation <em>exact</em> — a response can never outlive the data it was built from, and never expires early while the data is unchanged.</li>
+      <li><b>Money crosses the wire as a string.</b> <code>gross_volume</code> is <code>DECIMAL(18,2)</code>; as a JSON number it would reach a browser as an IEEE double and reintroduce exactly the rounding the warehouse type exists to prevent.</li>
+    </ul>
+    <p class="caption" style="margin-top:14px;">The whole suite runs with no Trino driver installed and no warehouse reachable — the driver is imported lazily, so tests inject a fake connection underneath the real repository. Keeping <code>trino</code> out of CI is what proves that still holds.</p>
+  </section>
+
+  <section>
     <h2>The pipelines in action</h2>
     <div class="shots">
       <div class="card">
@@ -150,7 +192,7 @@
       </div>
       <div class="card">
         <img src="images/grafana-payments-demo-overview.png" alt="Grafana dashboard of payment volume, authorization rate, refunds and payment mix">
-        <p class="caption"><strong>Grafana</strong> — operational dashboard reading Iceberg gold tables through Trino.</p>
+        <p class="caption"><strong>Grafana</strong> — pipeline-output validation: row counts, freshness, and authorization rate read from Iceberg gold through Trino. Grafana is for operating the platform; business analytics is served by the API.</p>
       </div>
       <div class="card">
         <img src="images/trino-gold-metrics-query.png" alt="Trino query results over the payment_metrics_gold Iceberg table">
@@ -168,13 +210,14 @@
     <div class="chips">
       <span class="chip">Python</span><span class="chip">SQL</span><span class="chip">Kafka (KRaft)</span>
       <span class="chip">Debezium CDC</span><span class="chip">Spark Structured Streaming</span>
-      <span class="chip">Apache Iceberg</span><span class="chip">Trino</span><span class="chip">Airflow</span>
-      <span class="chip">dbt</span><span class="chip">Snowflake</span><span class="chip">AWS S3</span>
-      <span class="chip">Terraform</span><span class="chip">Docker Compose</span><span class="chip">Kubernetes</span>
-      <span class="chip">Databricks DLT</span><span class="chip">Grafana</span><span class="chip">Prometheus</span>
+      <span class="chip">Apache Iceberg</span><span class="chip">Trino</span><span class="chip">Hive Metastore</span>
+      <span class="chip">HDFS</span><span class="chip">Airflow</span><span class="chip">dbt</span>
+      <span class="chip">Snowflake</span><span class="chip">AWS S3</span><span class="chip">FastAPI</span>
+      <span class="chip">Kubernetes</span><span class="chip">Terraform</span>
+      <span class="chip">Databricks DLT</span><span class="chip">Prometheus</span><span class="chip">Grafana</span>
       <span class="chip">GitHub Actions CI</span>
     </div>
-    <p class="lead" style="margin-top:10px;">Everything is reproducible: the local stack runs on Docker Compose (or kind/Kubernetes), the cloud tier is provisioned with Terraform, and CI runs tests, lint, dbt compile, and Terraform validation on every push.</p>
+    <p class="lead" style="margin-top:10px;"><strong>Kubernetes is the primary runtime</strong> — Airflow submits Spark work as pods, and both it and the Docker Compose inner loop generate their config from a single source, so the two cannot drift. The cloud tier is provisioned with Terraform, and CI runs 269 tests, lint, dbt compile, and Terraform validation on every push — with no warehouse, driver, or cluster required.</p>
   </section>
 
   <footer>
