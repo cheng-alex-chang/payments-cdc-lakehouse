@@ -995,6 +995,23 @@ def test_dashboard_datasource_uids_are_provisioned() -> None:
     assert not dangling, f"dashboard references unprovisioned datasource uids: {dangling}"
 
 
+def test_piecharts_render_one_slice_per_row() -> None:
+    """A GROUP BY query needs `reduceOptions.values = true` on a piechart.
+
+    With `values: false` Grafana reduces each *field* to a single number instead of rendering one
+    slice per *row*, so a breakdown by payment_method collapsed to one slice labelled `payments`
+    -- the column alias. The query was right; the panel was reading it wrong.
+    """
+    dashboard_path, _ = _grafana_paths()
+    dashboard = json.loads(dashboard_path.read_text())
+
+    piecharts = [p for p in dashboard["panels"] if p["type"] == "piechart"]
+    assert piecharts, "expected at least one piechart"
+    for panel in piecharts:
+        options = panel["options"]["reduceOptions"]
+        assert options.get("values") is True, panel["title"]
+
+
 def test_payment_aggregate_panels_read_gold_via_trino() -> None:
     dashboard_path, _ = _grafana_paths()
     dashboard = json.loads(dashboard_path.read_text())
