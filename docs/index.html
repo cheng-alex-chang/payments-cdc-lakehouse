@@ -195,7 +195,7 @@ curl 'http://localhost:8000/v1/metrics/summary'
         <p class="caption"><strong>Grafana</strong> — pipeline-output validation: row counts, freshness, and authorization rate read from Iceberg gold through Trino. Grafana is for operating the platform; business analytics is served by the API.</p>
       </div>
       <div class="card">
-        <img src="images/trino-gold-metrics-query.png" alt="Trino query results over the payment_metrics_gold Iceberg table">
+        <img src="images/trino-gold-metrics-query.png" alt="Trino querying the payment_metrics_gold Iceberg table via kubectl exec against the Kubernetes cluster — hourly aggregates across ten countries and five payment methods">
         <p class="caption"><strong>Trino</strong> — federated SQL over the Iceberg lakehouse.</p>
       </div>
       <div class="card">

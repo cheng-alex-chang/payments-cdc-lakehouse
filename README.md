@@ -376,7 +376,7 @@ Grafana shows the seeded demo data as business-facing metrics, including volume,
 
 Trino shows the materialized gold layer directly, making it easy to inspect the hourly aggregates produced by the pipeline.
 
-![Trino query results for the payment_metrics_gold Iceberg table](docs/images/trino-gold-metrics-query.png)
+![Trino querying the payment_metrics_gold Iceberg table via kubectl exec against the Kubernetes cluster — hourly aggregates across ten countries and five payment methods](docs/images/trino-gold-metrics-query.png)
 
 ### Snowflake FX ELT
 
