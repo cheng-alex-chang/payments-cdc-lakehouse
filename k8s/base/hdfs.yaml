@@ -75,12 +75,14 @@ spec:
             httpGet:
               path: /
               port: http
+            timeoutSeconds: 5
             initialDelaySeconds: 30
             periodSeconds: 15
           livenessProbe:
             httpGet:
               path: /
               port: http
+            timeoutSeconds: 5
             initialDelaySeconds: 60
             periodSeconds: 30
           volumeMounts:
@@ -181,12 +183,14 @@ spec:
             httpGet:
               path: /
               port: http
+            timeoutSeconds: 5
             initialDelaySeconds: 30
             periodSeconds: 15
           livenessProbe:
             httpGet:
               path: /
               port: http
+            timeoutSeconds: 5
             initialDelaySeconds: 60
             periodSeconds: 30
           volumeMounts:

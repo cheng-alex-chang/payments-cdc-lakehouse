@@ -189,6 +189,7 @@ spec:
             httpGet:
               path: /connectors
               port: http
+            timeoutSeconds: 5
             initialDelaySeconds: 45
             periodSeconds: 15
 ---

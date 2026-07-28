@@ -52,12 +52,14 @@ spec:
             httpGet:
               path: /v1/info
               port: http
+            timeoutSeconds: 5
             initialDelaySeconds: 30
             periodSeconds: 15
           livenessProbe:
             httpGet:
               path: /v1/info
               port: http
+            timeoutSeconds: 5
             initialDelaySeconds: 60
             periodSeconds: 30
           volumeMounts:

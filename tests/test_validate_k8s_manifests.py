@@ -922,12 +922,20 @@ def test_every_workload_declares_a_readiness_probe() -> None:
     assert not missing, f"workloads without a readinessProbe: {missing}"
 
 
-def test_exec_probes_override_the_one_second_default_timeout() -> None:
-    """An exec probe that spawns a JVM or a Python CLI cannot answer inside the 1s default.
+def test_every_probe_sets_timeout_seconds_explicitly() -> None:
+    """No probe may run on the implicit 1-second default, whatever its type.
 
-    Kafka shipped this way once: a healthy broker that never went Ready, because the probe was
-    killed before its command returned.
+    This started as an exec-only rule, on the theory that only a spawned process could be too slow.
+    A live cluster disproved that: the API's readiness probe hits /v1/ready, which queries Trino,
+    and the event log recorded `context deadline exceeded` during startup. Warm it answers in 20ms,
+    so nothing in a test would have caught it -- and three slow probes in a row would have pulled a
+    healthy API out of its Service endpoints.
+
+    The rule that survives is simpler than "exec probes are slow": a probe reaching anything beyond
+    its own process needs a stated budget, and writing it down forces the author to think about
+    what the check actually costs. Kafka (15s) and the Airflow scheduler (20s) are the extremes.
     """
+    implicit = []
     for path in sorted(K8S_BASE.glob("*.yaml")):
         for doc in yaml.safe_load_all(path.read_text(encoding="utf-8")):
             if not doc or doc.get("kind") not in ("Deployment", "StatefulSet"):
@@ -935,11 +943,10 @@ def test_exec_probes_override_the_one_second_default_timeout() -> None:
             for container in doc["spec"]["template"]["spec"]["containers"]:
                 for kind in ("readinessProbe", "livenessProbe", "startupProbe"):
                     probe = container.get(kind)
-                    if probe and "exec" in probe:
-                        assert probe.get("timeoutSeconds", 1) > 1, (
-                            f"{doc['metadata']['name']}/{container['name']} {kind} runs a command "
-                            "with the 1s default timeoutSeconds"
-                        )
+                    if probe and "timeoutSeconds" not in probe:
+                        implicit.append(f"{doc['metadata']['name']}/{container['name']}/{kind}")
+
+    assert not implicit, f"probes relying on the 1s default timeoutSeconds: {implicit}"
 
 
 def test_container_images_are_pinned_to_a_version() -> None:

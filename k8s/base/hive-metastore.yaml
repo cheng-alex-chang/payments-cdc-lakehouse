@@ -71,11 +71,13 @@ spec:
           readinessProbe:
             tcpSocket:
               port: thrift
+            timeoutSeconds: 3
             initialDelaySeconds: 45
             periodSeconds: 15
           livenessProbe:
             tcpSocket:
               port: thrift
+            timeoutSeconds: 3
             initialDelaySeconds: 90
             periodSeconds: 30
           volumeMounts:

@@ -66,6 +66,7 @@ spec:
             httpGet:
               path: /v1/health
               port: http
+            timeoutSeconds: 3
             initialDelaySeconds: 10
             periodSeconds: 20
           # Readiness does require Trino: an instance that cannot reach the warehouse has
@@ -74,5 +75,6 @@ spec:
             httpGet:
               path: /v1/ready
               port: http
+            timeoutSeconds: 5
             initialDelaySeconds: 15
             periodSeconds: 15
