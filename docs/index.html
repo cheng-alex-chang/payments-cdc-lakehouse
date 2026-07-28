@@ -58,7 +58,16 @@
   .card img, .card object { width: 100%; height: auto; display: block; border-radius: 8px; }
   .caption { font-size: 0.88rem; color: var(--muted); margin-top: 10px; }
   .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
-  .shots { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+
+  /* Screenshots are dense dashboards captured at ~3800px wide. Two columns rendered them at
+     ~450px, which is unreadable, so they get the full column and a click through to the
+     original -- a plain link rather than a lightbox, to keep this page dependency-free. */
+  .shots { display: grid; grid-template-columns: 1fr; gap: 18px; }
+  a.zoom { display: block; cursor: zoom-in; }
+  a.zoom:hover { text-decoration: none; }
+  a.zoom img { transition: opacity 0.15s ease; }
+  a.zoom:hover img { opacity: 0.9; }
+  .hint { font-size: 0.85rem; color: var(--muted); margin-bottom: 4px; }
 
   /* code */
   pre {
@@ -125,11 +134,15 @@
     <h2>Architecture — two pipelines, two jobs, one API</h2>
     <p class="lead">A shared Postgres payments source feeds both tiers. The <strong>streaming lakehouse</strong> proves change-data-capture correctness: every insert, update, and delete replays safely into Iceberg through checkpointed Spark jobs. The <strong>batch warehouse</strong> proves analytical modeling: incremental extraction, raw VARIANT landing, and a tested dbt star schema. A <strong>serving API</strong> then closes the loop, handing the curated result back to applications.</p>
     <div class="card">
-      <img src="images/architecture-overview.svg" alt="Platform architecture: Postgres feeding a streaming CDC lakehouse (Debezium, Kafka, Spark, Iceberg, Trino) and a batch Snowflake warehouse (S3, COPY INTO, dbt)">
+      <a class="zoom" href="images/architecture-overview.svg" target="_blank" rel="noopener" aria-label="Open full-size image">
+          <img src="images/architecture-overview.svg" alt="Platform architecture: Postgres feeding a streaming CDC lakehouse (Debezium, Kafka, Spark, Iceberg, Trino) and a batch Snowflake warehouse (S3, COPY INTO, dbt)">
+        </a>
       <p class="caption">The full platform: CDC lakehouse (top path) for hourly operational analytics, Snowflake ELT (bottom path) for monthly USD-normalized financials.</p>
     </div>
     <div class="card">
-      <img src="images/architecture-snowflake-elt.svg" alt="Snowflake ELT architecture: FX REST API and Postgres staged to S3 as date-partitioned JSON, loaded to Snowflake RAW VARIANT tables, transformed by dbt into a star schema">
+      <a class="zoom" href="images/architecture-snowflake-elt.svg" target="_blank" rel="noopener" aria-label="Open full-size image">
+          <img src="images/architecture-snowflake-elt.svg" alt="Snowflake ELT architecture: FX REST API and Postgres staged to S3 as date-partitioned JSON, loaded to Snowflake RAW VARIANT tables, transformed by dbt into a star schema">
+        </a>
       <p class="caption">The warehouse tier: incremental watermark extraction → date-partitioned S3 staging → <code>COPY INTO</code> RAW → dbt staging/dims/fact/aggregate, with 12 data-quality gates.</p>
     </div>
   </section>
@@ -138,7 +151,9 @@
     <h2>Live: the dbt build in action</h2>
     <p class="lead">A real run against Snowflake — six star-schema models build and all twelve data-quality gates pass, ending in <span style="color:var(--good); font-weight:600;">PASS=12 ERROR=0</span>.</p>
     <div class="card">
-      <img src="images/dbt-live-demo.gif" alt="Animated terminal: dbt run builds 6 models, dbt test passes 12 of 12 data-quality gates against Snowflake">
+      <a class="zoom" href="images/dbt-live-demo.gif" target="_blank" rel="noopener" aria-label="Open full-size image">
+          <img src="images/dbt-live-demo.gif" alt="Animated terminal: dbt run builds 6 models, dbt test passes 12 of 12 data-quality gates against Snowflake">
+        </a>
     </div>
   </section>
 
@@ -146,7 +161,9 @@
     <h2>The ~1 TB scale story</h2>
     <p class="lead">The same dbt project, unchanged, was benchmarked against <strong>4.2&nbsp;billion synthetic payments (1.06&nbsp;TB of logical JSON)</strong> generated server-side in Snowflake. All 12 gates passed, a 5M-row daily increment reconciled exactly — and the run surfaced a real bottleneck: staging materialized as a view re-runs its 4.4B-row dedup for every consumer. Flipping one configurable knob (<code>DBT_STAGING_MATERIALIZED=table</code>) pays the dedup once and cuts the conformed-dimension build <strong>54×</strong>.</p>
     <div class="card">
-      <img src="images/scale-benchmark-build-times.svg" alt="Bar chart: dim_date build 570.9s as a view vs 10.7s with staging as a table (54x); fct_payments_usd 525.3s vs 209.6s (2.5x)">
+      <a class="zoom" href="images/scale-benchmark-build-times.svg" target="_blank" rel="noopener" aria-label="Open full-size image">
+          <img src="images/scale-benchmark-build-times.svg" alt="Bar chart: dim_date build 570.9s as a view vs 10.7s with staging as a table (54x); fct_payments_usd 525.3s vs 209.6s (2.5x)">
+        </a>
       <p class="caption">Full method, results, and stated limitations in the <a href="https://github.com/cheng-alex-chang/payments-data-platform/blob/main/docs/scale-benchmark.md">benchmark write-up</a>.</p>
     </div>
   </section>
@@ -155,7 +172,9 @@
     <h2>The star schema</h2>
     <p class="lead">Kimball dimensional model: one row per payment in the fact, USD-normalized via an FX dimension that forward-fills weekend and holiday rate gaps; a conformed date dimension; tested grain and uniqueness. Explore it interactively in the <a href="./dbt-docs/">hosted dbt lineage browser</a>.</p>
     <div class="card">
-      <img src="images/star-schema-fx.svg" alt="Star schema ERD: fct_payments_usd at the center with dim_date and dim_fx_rates, fed by staging views over RAW">
+      <a class="zoom" href="images/star-schema-fx.svg" target="_blank" rel="noopener" aria-label="Open full-size image">
+          <img src="images/star-schema-fx.svg" alt="Star schema ERD: fct_payments_usd at the center with dim_date and dim_fx_rates, fed by staging views over RAW">
+        </a>
     </div>
   </section>
 
@@ -185,21 +204,30 @@ curl 'http://localhost:8000/v1/metrics/summary'
 
   <section>
     <h2>The pipelines in action</h2>
+    <p class="hint">Click any screenshot to open it full size.</p>
     <div class="shots">
       <div class="card">
-        <img src="images/airflow-payments-pipeline.png" alt="Airflow graph view of a successful payments_pipeline run on Kubernetes — nine tasks green, with bronze_load, silver_transform and gold_transform running as KubernetesPodOperator and the rest as BashOperator">
+        <a class="zoom" href="images/airflow-payments-pipeline.png" target="_blank" rel="noopener" aria-label="Open full-size image">
+          <img src="images/airflow-payments-pipeline.png" alt="Airflow graph view of a successful payments_pipeline run on Kubernetes — nine tasks green, with bronze_load, silver_transform and gold_transform running as KubernetesPodOperator and the rest as BashOperator">
+        </a>
         <p class="caption"><strong>Airflow</strong> — a full run on the cluster. The three Spark tasks are <code>KubernetesPodOperator</code> pods; every other task talks HTTP to a service name that resolves under Compose and Kubernetes alike.</p>
       </div>
       <div class="card">
-        <img src="images/grafana-payments-demo-overview.png" alt="Grafana dashboard of payment volume, authorization rate, refunds and payment mix">
+        <a class="zoom" href="images/grafana-payments-demo-overview.png" target="_blank" rel="noopener" aria-label="Open full-size image">
+          <img src="images/grafana-payments-demo-overview.png" alt="Grafana dashboard of payment volume, authorization rate, refunds and payment mix">
+        </a>
         <p class="caption"><strong>Grafana</strong> — pipeline-output validation: row counts, freshness, and authorization rate read from Iceberg gold through Trino. Grafana is for operating the platform; business analytics is served by the API.</p>
       </div>
       <div class="card">
-        <img src="images/trino-gold-metrics-query.png" alt="Trino querying the payment_metrics_gold Iceberg table via kubectl exec against the Kubernetes cluster — hourly aggregates across ten countries and five payment methods">
+        <a class="zoom" href="images/trino-gold-metrics-query.png" target="_blank" rel="noopener" aria-label="Open full-size image">
+          <img src="images/trino-gold-metrics-query.png" alt="Trino querying the payment_metrics_gold Iceberg table via kubectl exec against the Kubernetes cluster — hourly aggregates across ten countries and five payment methods">
+        </a>
         <p class="caption"><strong>Trino</strong> — federated SQL over the Iceberg lakehouse.</p>
       </div>
       <div class="card">
-        <img src="images/snowflake-usd-by-currency.png" alt="Snowflake chart of USD-normalized payment volume by currency">
+        <a class="zoom" href="images/snowflake-usd-by-currency.png" target="_blank" rel="noopener" aria-label="Open full-size image">
+          <img src="images/snowflake-usd-by-currency.png" alt="Snowflake chart of USD-normalized payment volume by currency">
+        </a>
         <p class="caption"><strong>Snowflake</strong> — USD-normalized volume by currency from the star schema.</p>
       </div>
     </div>
