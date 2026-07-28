@@ -240,7 +240,7 @@ services:
       start_period: 20s
 
   statsd-exporter:
-    image: prom/statsd-exporter:latest
+    image: prom/statsd-exporter:v0.29.0
     container_name: dp-statsd-exporter
     restart: unless-stopped
     ports:

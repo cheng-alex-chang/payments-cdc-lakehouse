@@ -900,3 +900,65 @@ def postgres_image() -> str:
         if doc and doc.get("kind") == "StatefulSet":
             return doc["spec"]["template"]["spec"]["containers"][0]["image"]
     raise AssertionError("postgres StatefulSet not found")
+
+
+def test_every_workload_declares_a_readiness_probe() -> None:
+    """Unprobed workloads make scripts/k8s_verify.sh report readiness it never checked.
+
+    `kubectl rollout status` is satisfied when the desired replicas are *available*, and without a
+    readinessProbe a container counts as available the instant it starts. Six workloads -- both
+    Airflow halves, Prometheus, Grafana, and the two exporters -- had none, so the verify script
+    would call the platform ready while Airflow was still parsing DAGs.
+    """
+    missing = []
+    for path in sorted(K8S_BASE.glob("*.yaml")):
+        for doc in yaml.safe_load_all(path.read_text(encoding="utf-8")):
+            if not doc or doc.get("kind") not in ("Deployment", "StatefulSet"):
+                continue
+            for container in doc["spec"]["template"]["spec"]["containers"]:
+                if "readinessProbe" not in container:
+                    missing.append(f"{doc['kind']}/{doc['metadata']['name']}/{container['name']}")
+
+    assert not missing, f"workloads without a readinessProbe: {missing}"
+
+
+def test_exec_probes_override_the_one_second_default_timeout() -> None:
+    """An exec probe that spawns a JVM or a Python CLI cannot answer inside the 1s default.
+
+    Kafka shipped this way once: a healthy broker that never went Ready, because the probe was
+    killed before its command returned.
+    """
+    for path in sorted(K8S_BASE.glob("*.yaml")):
+        for doc in yaml.safe_load_all(path.read_text(encoding="utf-8")):
+            if not doc or doc.get("kind") not in ("Deployment", "StatefulSet"):
+                continue
+            for container in doc["spec"]["template"]["spec"]["containers"]:
+                for kind in ("readinessProbe", "livenessProbe", "startupProbe"):
+                    probe = container.get(kind)
+                    if probe and "exec" in probe:
+                        assert probe.get("timeoutSeconds", 1) > 1, (
+                            f"{doc['metadata']['name']}/{container['name']} {kind} runs a command "
+                            "with the 1s default timeoutSeconds"
+                        )
+
+
+def test_container_images_are_pinned_to_a_version() -> None:
+    """`:latest` makes a deployment unreproducible -- two clusters built a week apart differ.
+
+    Covers both runtimes from one place: the Kustomize base and the Compose file.
+    """
+    sources = list(K8S_BASE.glob("*.yaml")) + [REPO_ROOT / "docker-compose.yml"]
+    unpinned = []
+    for path in sources:
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            stripped = line.strip().lstrip("- ")
+            if not stripped.startswith("image:"):
+                continue
+            image = stripped.split("image:", 1)[1].strip().strip("\"'")
+            if "${" in image:  # Compose interpolation, resolved at run time
+                continue
+            tag = image.rsplit(":", 1)[1] if ":" in image.rsplit("/", 1)[-1] else ""
+            if tag in ("", "latest"):
+                unpinned.append(f"{path.name}:{number} {image}")
+
+    assert not unpinned, f"unpinned images: {unpinned}"

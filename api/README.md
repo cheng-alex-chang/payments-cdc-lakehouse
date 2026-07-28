@@ -18,6 +18,11 @@ an application. This closes that loop.
 | `GET` | `/metrics` | Prometheus scrape |
 | `GET` | `/docs` | Interactive OpenAPI UI |
 
+The schema is committed at [`docs/openapi.json`](../docs/openapi.json) so the contract is reviewable
+in a diff rather than only reachable from a running server. `tests/test_api_app.py` fails if it
+drifts from the app; regenerate it with the command in that test's docstring after any route or
+model change.
+
 ```bash
 curl 'http://localhost:8000/v1/metrics/hourly?country_code=NL&limit=5'
 curl 'http://localhost:8000/v1/metrics/summary?start=2026-03-01T00:00:00'

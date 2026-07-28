@@ -39,7 +39,7 @@ spec:
     spec:
       containers:
         - name: statsd-exporter
-          image: prom/statsd-exporter:latest
+          image: prom/statsd-exporter:v0.29.0
           resources:
             requests:
               cpu: 25m
@@ -54,6 +54,13 @@ spec:
               protocol: UDP
             - name: metrics
               containerPort: 9102
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
           volumeMounts:
             - name: statsd-config
               mountPath: /etc/statsd/mapping.yml
@@ -111,6 +118,13 @@ spec:
           ports:
             - name: metrics
               containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
 ---
 apiVersion: v1
 kind: Service
@@ -159,6 +173,14 @@ spec:
           ports:
             - name: http
               containerPort: 9090
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
           volumeMounts:
             - name: prometheus-config
               mountPath: /etc/prometheus/prometheus.yml
@@ -215,6 +237,14 @@ spec:
           ports:
             - name: http
               containerPort: 3000
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 18
           env:
             # The "Payments Gold (Trino)" datasource is a plugin, not a core Grafana type; without
             # this the provisioned datasource loads as "unknown" and every gold panel stays blank.

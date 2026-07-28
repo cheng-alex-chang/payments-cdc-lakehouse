@@ -68,6 +68,7 @@ spec:
                 - /bin/sh
                 - -c
                 - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+            timeoutSeconds: 5
             initialDelaySeconds: 10
             periodSeconds: 10
           volumeMounts:
@@ -269,6 +270,18 @@ spec:
           ports:
             - name: http
               containerPort: 8080
+          # Without this, `kubectl rollout status` calls the Deployment available the moment the
+          # container starts -- before the webserver binds 8080 and long before it can parse a DAG.
+          # scripts/k8s_verify.sh reports readiness, so an unprobed workload makes it lie.
+          # /health is the same endpoint the Compose healthcheck uses, so it is already proven.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 12
           envFrom:
             - secretRef:
                 name: platform-secrets
@@ -391,6 +404,25 @@ spec:
           command:
             - airflow
             - scheduler
+          # The scheduler serves no HTTP port, so readiness has to be an exec check -- the same one
+          # the official Airflow chart uses. `--local` restricts it to this host's SchedulerJob.
+          #
+          # timeoutSeconds is 20, not the 1-second default: this spawns a fresh Airflow CLI process
+          # that imports the whole framework before it answers. The Kafka probe failed exactly this
+          # way earlier -- a healthy process that never reported Ready because the probe timed out.
+          readinessProbe:
+            exec:
+              command:
+                - airflow
+                - jobs
+                - check
+                - --job-type
+                - SchedulerJob
+                - --local
+            initialDelaySeconds: 30
+            periodSeconds: 60
+            timeoutSeconds: 20
+            failureThreshold: 5
           envFrom:
             - secretRef:
                 name: platform-secrets

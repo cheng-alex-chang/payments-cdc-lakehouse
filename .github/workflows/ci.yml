@@ -58,7 +58,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: databricks/setup-cli@main
+      - uses: databricks/setup-cli@v1.9.0
 
       - name: Validate bundle
         if: env.DATABRICKS_HOST != ''
