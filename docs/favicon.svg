@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Payments Data Platform">
+  <!-- The medallion architecture as the mark: bronze, silver and gold stacked in the order data
+       flows through them. Chosen because it survives 16px, where a wordmark or a pipeline diagram
+       turns to mush; three bars and a colour progression stay legible.
+
+       The dark plate matches the site's ink colour (#0f172a) so the icon holds its shape against
+       both light and dark browser chrome rather than dissolving into one of them.
+
+       Note for future edits: a double hyphen is illegal inside an XML comment and makes this file
+       unparseable. The same mistake in hdfs-site.xml crash-looped the NameNode. -->
+  <rect width="32" height="32" rx="7" fill="#0f172a"/>
+  <rect x="7"   y="8"  width="18" height="4.4" rx="1.4" fill="#c87f3c"/>
+  <rect x="7"   y="14" width="18" height="4.4" rx="1.4" fill="#cbd5e1"/>
+  <rect x="7"   y="20" width="18" height="4.4" rx="1.4" fill="#f2c230"/>
+</svg>
