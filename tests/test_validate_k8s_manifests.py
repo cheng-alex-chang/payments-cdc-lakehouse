@@ -897,3 +897,22 @@ def test_container_images_are_pinned_to_a_version() -> None:
                 unpinned.append(f"{path.name}:{number} {image}")
 
     assert not unpinned, f"unpinned images: {unpinned}"
+
+
+def test_shell_scripts_reference_no_deleted_paths() -> None:
+    """A script that builds a deleted directory fails twenty minutes into a cluster spin-up.
+
+    scripts/k8s_up.sh kept building local/hive-metastore:dev after config/hive-metastore/ was
+    removed, and nothing caught it -- the manifests rendered fine, every test passed, and the
+    failure only appeared on the next cold start. Paths referenced by shell scripts are as much a
+    dependency as an import.
+    """
+    import re
+
+    for script in sorted((REPO_ROOT / "scripts").glob("*.sh")):
+        text = script.read_text(encoding="utf-8")
+        for match in re.finditer(r"(?:^|\s)((?:config|drivers|k8s|airflow|sql)/[A-Za-z0-9_./-]+)", text):
+            candidate = match.group(1).rstrip(".,;:")
+            assert (REPO_ROOT / candidate).exists(), (
+                f"{script.name} references {candidate}, which does not exist"
+            )

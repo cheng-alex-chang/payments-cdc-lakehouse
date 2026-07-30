@@ -31,14 +31,9 @@ kind get clusters | grep -qx "${CLUSTER_NAME}" \
 docker build -t local/data-pipeline-airflow:dev -f config/airflow/Dockerfile .
 docker build -t local/trino-exporter:dev config/trino-exporter
 docker build -t local/payments-api:dev -f config/api/Dockerfile .
-cp drivers/postgresql-42.7.5.jar config/hive-metastore/postgresql-42.7.5.jar
-trap 'rm -f "${ROOT_DIR}/config/hive-metastore/postgresql-42.7.5.jar"' EXIT
-docker build -t local/hive-metastore:dev config/hive-metastore
-rm -f config/hive-metastore/postgresql-42.7.5.jar
 kind load docker-image local/data-pipeline-airflow:dev --name data-pipeline
 kind load docker-image local/trino-exporter:dev --name data-pipeline
 kind load docker-image local/payments-api:dev --name data-pipeline
-kind load docker-image local/hive-metastore:dev --name data-pipeline
 
 # Jobs have immutable pod templates, so `kubectl apply` over an existing Job
 # fails ("field is immutable"). Delete any existing Jobs first so re-running this
