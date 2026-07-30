@@ -1,0 +1,160 @@
+# Iceberg REST catalog — replaces Hive Metastore.
+#
+# Hive Metastore is the legacy half of the old stack, not HDFS: Thrift RPC, a relational database of
+# its own, no fine-grained access control, no credential vending. A REST catalog replaces all of it
+# with an HTTP contract any engine can speak without a Thrift client.
+#
+# It also removes a constraint discovered in Phase 1: a filesystem-backed catalog has to resolve its
+# warehouse directory through the Hadoop FileSystem API, which forces s3a:// and hadoop-aws. A REST
+# catalog does not live on a filesystem, so Iceberg's own S3FileIO is sufficient and the Hadoop S3
+# connector drops out entirely. See docs/migration-storage-catalog.md.
+#
+# The catalog database is a second database on the existing Postgres instance rather than a new
+# server. That instance is renamed metastore-db -> catalog-db in Phase 4, once Hive Metastore is
+# gone and the old name has stopped being true.
+apiVersion: v1
+kind: Service
+metadata:
+  name: iceberg-rest
+  namespace: data-pipeline
+  labels:
+    app.kubernetes.io/name: iceberg-rest
+    app.kubernetes.io/component: catalog
+spec:
+  selector:
+    app.kubernetes.io/name: iceberg-rest
+  ports:
+    - name: http
+      port: 8181
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iceberg-rest
+  namespace: data-pipeline
+  labels:
+    app.kubernetes.io/name: iceberg-rest
+    app.kubernetes.io/component: catalog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: iceberg-rest
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: iceberg-rest
+        app.kubernetes.io/component: catalog
+    spec:
+      initContainers:
+        # The catalog database has to exist before migrate runs. CREATE DATABASE has no
+        # IF NOT EXISTS, so this checks first and is safe to re-run.
+        - name: create-catalog-db
+          image: postgres:15
+          env:
+            - name: PGHOST
+              value: metastore-db
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef: { name: platform-secrets, key: METASTORE_USER }
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef: { name: platform-secrets, key: METASTORE_PASSWORD }
+            - name: PGDATABASE
+              valueFrom:
+                secretKeyRef: { name: platform-secrets, key: METASTORE_DB }
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              i=0
+              until pg_isready -q; do
+                i=$((i+1)); [ "$i" -ge 60 ] && { echo "timed out waiting for postgres" >&2; exit 1; }
+                sleep 2
+              done
+              if [ "$(psql -tAc "SELECT 1 FROM pg_database WHERE datname='catalog'")" = "1" ]; then
+                echo "database catalog already exists"
+              else
+                psql -v ON_ERROR_STOP=1 -c "CREATE DATABASE catalog"
+                echo "database catalog created"
+              fi
+        # Lakekeeper keeps its schema in Postgres and will not serve against an unmigrated
+        # database. Running migrate as an init container means a restart re-checks rather than
+        # requiring a separate Job that has to be ordered by hand.
+        - name: migrate
+          image: quay.io/lakekeeper/catalog:v0.13.1
+          args: ["migrate"]
+          envFrom:
+            - configMapRef: { name: iceberg-rest-config }
+          env:
+            - name: LAKEKEEPER__PG_USER
+              valueFrom:
+                secretKeyRef: { name: platform-secrets, key: METASTORE_USER }
+            - name: LAKEKEEPER__PG_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: platform-secrets, key: METASTORE_PASSWORD }
+            - name: LAKEKEEPER__PG_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef: { name: platform-secrets, key: CATALOG_ENCRYPTION_KEY }
+      containers:
+        - name: iceberg-rest
+          image: quay.io/lakekeeper/catalog:v0.13.1
+          args: ["serve"]
+          # Rust, not a JVM: no heap to size. Hive Metastore reserved 512 Mi and capped at 1024 Mi
+          # purely to contain its JVM.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              memory: 512Mi
+          ports:
+            - name: http
+              containerPort: 8181
+          envFrom:
+            - configMapRef: { name: iceberg-rest-config }
+          env:
+            - name: LAKEKEEPER__PG_USER
+              valueFrom:
+                secretKeyRef: { name: platform-secrets, key: METASTORE_USER }
+            - name: LAKEKEEPER__PG_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: platform-secrets, key: METASTORE_PASSWORD }
+            - name: LAKEKEEPER__PG_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef: { name: platform-secrets, key: CATALOG_ENCRYPTION_KEY }
+          # /health is unauthenticated and reports whether the catalog can reach its database.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            timeoutSeconds: 3
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            timeoutSeconds: 3
+            initialDelaySeconds: 30
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: iceberg-rest-config
+  namespace: data-pipeline
+  labels:
+    app.kubernetes.io/name: iceberg-rest
+    app.kubernetes.io/component: catalog
+data:
+  # Non-secret connection shape. Credentials arrive separately from platform-secrets so nothing
+  # sensitive is ever in a ConfigMap.
+  LAKEKEEPER__PG_HOST_R: metastore-db
+  LAKEKEEPER__PG_HOST_W: metastore-db
+  LAKEKEEPER__PG_PORT: "5432"
+  LAKEKEEPER__PG_DATABASE: catalog
+  LAKEKEEPER__LISTEN_PORT: "8181"

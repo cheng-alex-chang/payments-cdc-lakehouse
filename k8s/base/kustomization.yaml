@@ -17,6 +17,7 @@ resources:
   - metastore-db.yaml
   - hdfs.yaml
   - minio.yaml
+  - iceberg-rest.yaml
   - hive-metastore.yaml
   - trino.yaml
   - kafka.yaml
@@ -107,6 +108,7 @@ configMapGenerator:
     files:
       - init_hdfs.py=../../scripts/init_hdfs.py
       - init_object_store.py=../../scripts/init_object_store.py
+      - init_iceberg_catalog.py=../../scripts/init_iceberg_catalog.py
       - maintain_iceberg.py=../../scripts/maintain_iceberg.py
       # Imported by publish_trino_tables, validate_trino, and maintain_iceberg. Shipping those
       # three without this one leaves them importing a module that is not in the container.
