@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 520" role="img" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif">
   <title>Payments Data Platform architecture</title>
-  <desc>A shared Postgres payments source feeds two pipelines: a streaming lakehouse (Debezium/Kafka to Spark medallion to Iceberg on HDFS to Trino) for operational analytics, and a batch warehouse (stage to AWS S3 to Snowflake RAW to dbt ELT to USD analytics) for financial analytics. Airflow orchestrates, Terraform governs, Prometheus and Grafana observe.</desc>
+  <desc>A shared Postgres payments source feeds two pipelines: a streaming lakehouse (Debezium/Kafka to Spark medallion to Iceberg on S3-compatible object storage, catalogued by an Iceberg REST catalog, to Trino) for operational analytics, and a batch warehouse (stage to AWS S3 to Snowflake RAW to dbt ELT to USD analytics) for financial analytics. Airflow orchestrates, Terraform governs, Prometheus and Grafana observe.</desc>
   <defs>
     <marker id="ao" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#94a3b8"/></marker>
   </defs>
@@ -31,7 +31,7 @@
   <text x="474" y="212" text-anchor="middle" font-size="11" fill="#64748b">bronze &#183; silver &#183; gold</text>
 
   <rect x="588" y="168" width="150" height="60" rx="10" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
-  <text x="663" y="194" text-anchor="middle" font-size="13.5" font-weight="600" fill="#1e3a5f">Iceberg on HDFS</text>
+  <text x="663" y="194" text-anchor="middle" font-size="13.5" font-weight="600" fill="#1e3a5f">Iceberg on S3</text>
   <text x="663" y="212" text-anchor="middle" font-size="11" fill="#64748b">open table format</text>
 
   <rect x="764" y="168" width="140" height="60" rx="10" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
