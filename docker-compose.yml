@@ -1,3 +1,25 @@
+# Storage and catalog access, shared by every service that reaches the lakehouse. The Kubernetes
+# side gets the same four values from platform-secrets (see k8s/base/airflow.yaml); here they come
+# from .env. Both names are set because the two clients disagree: Iceberg's S3FileIO and the s3a
+# checkpoint filesystem read the standard AWS_* pair, while the bootstrap scripts read S3_*.
+x-s3-env: &s3-env
+  AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+  AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+  S3_ACCESS_KEY: ${MINIO_ROOT_USER}
+  S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+
+# Lakekeeper's connection to its own state database. Identical in both runtimes apart from where
+# the values come from -- k8s/base/iceberg-rest.yaml carries the non-secret half in a ConfigMap.
+x-lakekeeper-env: &lakekeeper-env
+  LAKEKEEPER__PG_HOST_R: catalog-db
+  LAKEKEEPER__PG_HOST_W: catalog-db
+  LAKEKEEPER__PG_PORT: "5432"
+  LAKEKEEPER__PG_DATABASE: ${CATALOG_DB}
+  LAKEKEEPER__PG_USER: ${CATALOG_USER}
+  LAKEKEEPER__PG_PASSWORD: ${CATALOG_PASSWORD}
+  LAKEKEEPER__PG_ENCRYPTION_KEY: ${CATALOG_ENCRYPTION_KEY}
+  LAKEKEEPER__LISTEN_PORT: "8181"
+
 services:
   postgres:
     image: postgres:15
@@ -91,8 +113,9 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     ports:
-      # 9002, not 9000: the NameNode publishes 9000 for HDFS RPC until Phase 4 removes it. In-cluster
-      # traffic uses minio:9000 either way, so only the host-side mapping is affected.
+      # 9002 on the host, 9000 in the network. The split dates from HDFS holding 9000 for its
+      # NameNode RPC; it stays because docs and scripts reference it, and only the host-side
+      # mapping is affected -- in-cluster traffic addresses minio:9000 in both runtimes.
       - "9002:9000"
       - "9001:9001"
     volumes:
@@ -124,13 +147,58 @@ services:
       retries: 10
 
 
+  # Iceberg REST catalog -- the Compose half of k8s/base/iceberg-rest.yaml, which carries the
+  # reasoning for replacing Hive Metastore. Lakekeeper refuses to serve against an unmigrated
+  # database, and Compose has no init containers, so the migration runs as a one-shot service that
+  # the server waits on -- the same shape as airflow-init below.
+  iceberg-rest-migrate:
+    image: quay.io/lakekeeper/catalog:v0.13.1
+    container_name: dp-iceberg-rest-migrate
+    depends_on:
+      catalog-db:
+        condition: service_healthy
+    command: ["migrate"]
+    environment: *lakekeeper-env
+
+  iceberg-rest:
+    image: quay.io/lakekeeper/catalog:v0.13.1
+    container_name: dp-iceberg-rest
+    restart: unless-stopped
+    depends_on:
+      iceberg-rest-migrate:
+        condition: service_completed_successfully
+    command: ["serve"]
+    ports:
+      - "8181:8181"
+    environment: *lakekeeper-env
+    healthcheck:
+      # The image ships no shell and no curl, so the healthcheck runs the server binary's own
+      # subcommand rather than shelling out to an HTTP client. Kubernetes needs no equivalent:
+      # there the kubelet performs the httpGet itself, from outside the container.
+      test: ["CMD", "/home/nonroot/lakekeeper", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
   trino:
     image: trinodb/trino:477
     container_name: dp-trino
     restart: unless-stopped
     user: "0:0"
     depends_on:
-      - hive-metastore
+      # Trino resolves the warehouse location through the catalog when the Iceberg connector first
+      # initializes, so a catalog that is not answering yet means a broken connector rather than a
+      # slow one. MinIO holds the data those tables point at.
+      iceberg-rest:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    # iceberg.properties carries the endpoint and region but no credentials -- Trino's native S3
+    # client reads AWS_* from the environment, exactly as k8s/base/trino.yaml supplies them.
+    # Without these, table metadata reads fail with "Error processing metadata for table ...".
+    environment:
+      <<: *s3-env
     ports:
       - "8080:8080"
     volumes:
@@ -153,11 +221,12 @@ services:
     user: "0:0"
     entrypoint: ["/bin/bash", "-lc", "while true; do sleep 3600; done"]
     environment:
-      HADOOP_CONF_DIR: /opt/spark/conf
+      # The Kubernetes pods also set HOME=/tmp for the Ivy cache; this container runs as root, so
+      # its home is writable already and run_local_job.py passes spark.jars.ivy explicitly.
+      <<: *s3-env
     ports:
       - "4040:4040"
     volumes:
-      - spark_checkpoints:/checkpoints
       - .:/opt/project
 
   api:
@@ -271,6 +340,7 @@ services:
       - -c
       - airflow db migrate && airflow users create --username ${AIRFLOW_ADMIN_USERNAME} --password ${AIRFLOW_ADMIN_PASSWORD} --firstname Data --lastname Engineer --role Admin --email admin@example.com
     environment:
+      <<: *s3-env
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_USER}:${AIRFLOW_PASSWORD}@airflow-postgres/${AIRFLOW_DB}
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
@@ -297,6 +367,7 @@ services:
     ports:
       - "8088:8080"
     environment:
+      <<: *s3-env
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_USER}:${AIRFLOW_PASSWORD}@airflow-postgres/${AIRFLOW_DB}
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
@@ -333,6 +404,7 @@ services:
         condition: service_started
     command: scheduler
     environment:
+      <<: *s3-env
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_USER}:${AIRFLOW_PASSWORD}@airflow-postgres/${AIRFLOW_DB}
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
@@ -350,7 +422,6 @@ services:
 
 volumes:
   postgres_data:
-  spark_checkpoints:
   minio_data:
   catalog_db_data:
   grafana_data:

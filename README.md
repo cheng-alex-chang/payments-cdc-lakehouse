@@ -197,9 +197,13 @@ against that same data.
 ### Docker Compose (fast inner loop)
 
 ```bash
+cp .env.example .env                 # placeholder passwords; the file stays untracked
 docker compose up -d
 bash scripts/register_connector.sh   # Kubernetes does this with a Job instead
 ```
+
+`scripts/k8s_up.sh` seeds its own `secrets.env` automatically, so the copy above is the one manual
+step Compose has and Kubernetes does not.
 
 All long-running services use `restart: unless-stopped` and expose healthchecks (Kafka, MinIO, Trino, Airflow, Postgres variants). Dependent services wait on `condition: service_healthy` before starting, so the stack self-recovers from individual container crashes without manual intervention.
 
