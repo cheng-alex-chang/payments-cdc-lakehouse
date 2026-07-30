@@ -912,9 +912,14 @@ def test_shell_scripts_reference_no_deleted_paths() -> None:
     for script in sorted((REPO_ROOT / "scripts").glob("*.sh")):
         text = script.read_text(encoding="utf-8")
         for match in re.finditer(r"(?:^|\s)((?:config|drivers|k8s|airflow|sql)/[A-Za-z0-9_./-]+)", text):
-            candidate = match.group(1).rstrip(".,;:")
-            assert (REPO_ROOT / candidate).exists(), (
-                f"{script.name} references {candidate}, which does not exist"
+            candidate = (REPO_ROOT / match.group(1).rstrip(".,;:"))
+            # A gitignored file the script creates from a committed template is legitimately
+            # absent -- secrets.env is copied from secrets.env.example on first run, so it exists
+            # locally and never in CI. Accept the template as proof the reference is live.
+            if candidate.exists() or candidate.with_suffix(candidate.suffix + ".example").exists():
+                continue
+            raise AssertionError(
+                f"{script.name} references {candidate.relative_to(REPO_ROOT)}, which does not exist"
             )
 
 
