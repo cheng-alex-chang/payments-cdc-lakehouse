@@ -30,9 +30,16 @@ with DAG(
     max_active_runs=1,
     tags=["payments", "spark", "cdc"],
 ) as dag:
-    init_hdfs = BashOperator(
-        task_id="init_hdfs",
-        bash_command="python /opt/airflow/scripts/init_hdfs.py",
+    # Storage and catalog bootstrap, replacing init_hdfs. Both are idempotent, so a retry costs
+    # nothing, and both speak HTTP to a service name that resolves in either runtime.
+    init_object_store = BashOperator(
+        task_id="init_object_store",
+        bash_command="python /opt/airflow/scripts/init_object_store.py",
+    )
+
+    init_catalog = BashOperator(
+        task_id="init_catalog",
+        bash_command="python /opt/airflow/scripts/init_iceberg_catalog.py",
     )
 
     validate_connector = BashOperator(
@@ -80,4 +87,4 @@ with DAG(
         retries=1,
     )
 
-    init_hdfs >> validate_connector >> validate_schema >> bronze_load >> silver_transform >> gold_transform >> publish_trino_tables >> validate_trino >> maintain_iceberg
+    init_object_store >> init_catalog >> validate_connector >> validate_schema >> bronze_load >> silver_transform >> gold_transform >> publish_trino_tables >> validate_trino >> maintain_iceberg

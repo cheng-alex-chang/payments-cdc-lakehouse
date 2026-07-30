@@ -20,7 +20,15 @@ from typing import Any
 SPARK_IMAGE = "spark:3.5.8-python3"
 JOBS_DIR = "/opt/project/config/spark/jobs"
 
-ICEBERG_PACKAGE = "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1"
+# iceberg-aws-bundle carries the AWS SDK v2 that S3FileIO uses. hadoop-aws is still needed for
+# the Structured Streaming checkpoints, which are plain s3a:// paths rather than Iceberg tables --
+# it is pinned to 3.3.4 to match hadoop-client-api in spark:3.5.8-python3, because a mismatch
+# there produces class-loading errors that look nothing like a version problem.
+ICEBERG_PACKAGE = (
+    "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1"
+    ",org.apache.iceberg:iceberg-aws-bundle:1.6.1"
+    ",org.apache.hadoop:hadoop-aws:3.3.4"
+)
 KAFKA_PACKAGE = "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.8"
 
 # local[2] rather than local[*]: local[*] starts one task thread per core inside a single JVM and
@@ -84,9 +92,29 @@ def _kubernetes_operator(task_id: str, layer: str) -> Any:
             requests={"cpu": "500m", "memory": "1Gi"},
             limits={"memory": "2Gi"},
         ),
+        # These pods are built here, not from the Job templates in k8s/base/spark.yaml, so
+        # anything the jobs need in their environment has to be repeated in both places.
+        # S3 credentials live here because the Iceberg S3FileIO client and the s3a checkpoint
+        # filesystem both read the standard AWS_* variables.
         env_vars=[
             k8s.V1EnvVar(name="HOME", value="/tmp"),
             k8s.V1EnvVar(name="HADOOP_CONF_DIR", value="/opt/spark/conf"),
+            k8s.V1EnvVar(
+                name="AWS_ACCESS_KEY_ID",
+                value_from=k8s.V1EnvVarSource(
+                    secret_key_ref=k8s.V1SecretKeySelector(
+                        name="platform-secrets", key="MINIO_ROOT_USER"
+                    )
+                ),
+            ),
+            k8s.V1EnvVar(
+                name="AWS_SECRET_ACCESS_KEY",
+                value_from=k8s.V1EnvVarSource(
+                    secret_key_ref=k8s.V1SecretKeySelector(
+                        name="platform-secrets", key="MINIO_ROOT_PASSWORD"
+                    )
+                ),
+            ),
         ],
         volumes=[
             k8s.V1Volume(

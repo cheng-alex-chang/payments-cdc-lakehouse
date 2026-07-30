@@ -18,7 +18,14 @@ import sys
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
 LOGGER = logging.getLogger(__name__)
 
-_ICEBERG = "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1"
+# Must match ICEBERG_PACKAGE in airflow/dags/spark_jobs.py -- tests/test_spark_jobs.py fails if
+# it does not. iceberg-aws-bundle carries the AWS SDK v2 for S3FileIO; hadoop-aws is pinned to
+# 3.3.4 to match hadoop-client-api in the Spark image and is needed for the s3a:// checkpoints.
+_ICEBERG = (
+    "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1"
+    ",org.apache.iceberg:iceberg-aws-bundle:1.6.1"
+    ",org.apache.hadoop:hadoop-aws:3.3.4"
+)
 _KAFKA = "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.8"
 
 # local[2] and an explicit heap, matching the cluster. Under local[*] the driver starts one task

@@ -95,11 +95,15 @@ spec:
             - --conf
             - spark.jars.ivy=/tmp/.ivy2
             - --packages
-            - org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.8,org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1
+            - org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.8,org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1,org.apache.iceberg:iceberg-aws-bundle:1.6.1,org.apache.hadoop:hadoop-aws:3.3.4
             - /opt/project/config/spark/jobs/bronze_from_kafka.py
           env:
             - name: HOME
               value: /tmp
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_USER } }
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_PASSWORD } }
             - name: HADOOP_CONF_DIR
               value: /opt/spark/conf
           # An unbounded Spark driver is the classic way to take a Kubernetes node down: with no
@@ -165,11 +169,15 @@ spec:
             - --conf
             - spark.jars.ivy=/tmp/.ivy2
             - --packages
-            - org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1
+            - org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1,org.apache.iceberg:iceberg-aws-bundle:1.6.1,org.apache.hadoop:hadoop-aws:3.3.4
             - /opt/project/config/spark/jobs/silver_payments.py
           env:
             - name: HOME
               value: /tmp
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_USER } }
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_PASSWORD } }
             - name: HADOOP_CONF_DIR
               value: /opt/spark/conf
           # An unbounded Spark driver is the classic way to take a Kubernetes node down: with no
@@ -235,11 +243,15 @@ spec:
             - --conf
             - spark.jars.ivy=/tmp/.ivy2
             - --packages
-            - org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1
+            - org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1,org.apache.iceberg:iceberg-aws-bundle:1.6.1,org.apache.hadoop:hadoop-aws:3.3.4
             - /opt/project/config/spark/jobs/gold_metrics.py
           env:
             - name: HOME
               value: /tmp
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_USER } }
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_PASSWORD } }
             - name: HADOOP_CONF_DIR
               value: /opt/spark/conf
           # An unbounded Spark driver is the classic way to take a Kubernetes node down: with no

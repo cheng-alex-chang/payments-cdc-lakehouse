@@ -301,7 +301,11 @@ def load_module_with_fake_pyspark(monkeypatch: pytest.MonkeyPatch, module_name: 
 # run_local_job
 # ---------------------------------------------------------------------------
 
-_ICEBERG = "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1"
+_ICEBERG = (
+    "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1"
+    ",org.apache.iceberg:iceberg-aws-bundle:1.6.1"
+    ",org.apache.hadoop:hadoop-aws:3.3.4"
+)
 _KAFKA   = "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.8"
 
 @pytest.mark.parametrize(
@@ -921,11 +925,12 @@ def test_payments_pipeline_dag_has_expected_shape(monkeypatch: pytest.MonkeyPatc
     assert dag.schedule_interval is None
     assert dag.max_active_runs == 1
     assert dag.task_ids == {
-        "init_hdfs", "validate_connector", "validate_schema", "bronze_load",
+        "init_object_store", "init_catalog", "validate_connector", "validate_schema", "bronze_load",
         "silver_transform", "gold_transform", "publish_trino_tables", "validate_trino",
         "maintain_iceberg",
     }
-    assert dag.get_task("init_hdfs").downstream_task_ids == {"validate_connector"}
+    assert dag.get_task("init_object_store").downstream_task_ids == {"init_catalog"}
+    assert dag.get_task("init_catalog").downstream_task_ids == {"validate_connector"}
     assert dag.get_task("validate_connector").downstream_task_ids == {"validate_schema"}
     assert dag.get_task("validate_schema").downstream_task_ids == {"bronze_load"}
     assert dag.get_task("bronze_load").downstream_task_ids == {"silver_transform"}

@@ -99,6 +99,34 @@ sufficient on its own. **The filesystem-catalog-on-object-storage combination th
 known anti-pattern anyway** — it cannot do atomic commits — so hitting the wall was a signal the
 target architecture is the right one, not a detour around it.
 
+**Phase 3 — the streaming checkpoint is the open problem.** Bronze migrated cleanly: 50,004 rows
+written to Iceberg on MinIO through the REST catalog, readable from Trino. Silver does not, and the
+reason is specific:
+
+```
+BadRequestException: Malformed request: Table does not exist or user does not have
+permission to view it at location `s3://checkpoints/silver/sources/0/offsets/0`
+in warehouse `03039098-...`
+```
+
+Silver reads bronze as an Iceberg stream. Iceberg's micro-batch source writes its offset log
+through the **table's** FileIO, and under a REST catalog that FileIO is scoped to the warehouse —
+so it asks the catalog to authorise a path that belongs to no table, and the catalog correctly
+refuses. Disabling `s3.remote-signing-enabled` did not change it, which rules out request signing
+as the mechanism.
+
+This never arose on HDFS because the checkpoint filesystem and the table filesystem were the same
+unscoped `hdfs://`. It is a real consequence of a catalog that governs storage access, not a
+configuration slip. Candidate resolutions, none yet tried:
+
+1. Move checkpoints inside the warehouse prefix so they fall under the catalog's scope.
+2. Keep checkpoints on a PVC rather than object storage — small, node-local, and arguably where
+   streaming offsets belong.
+3. Give the streaming source a separate unscoped FileIO via `spark.sql.catalog` overrides.
+
+Option 2 is probably right: checkpoints are engine state, not lakehouse data, and putting them in
+the governed warehouse conflates the two.
+
 ## Verification
 
 The migration is considered complete only when the same checks that passed on HDFS pass again:
