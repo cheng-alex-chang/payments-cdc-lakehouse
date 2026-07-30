@@ -46,8 +46,9 @@ def normalize_payment(record: dict) -> dict:
 # anything about MinIO: the endpoint is a value, so pointing this at real S3 changes configuration
 # rather than code.
 #
-# File IO goes through Hadoop rather than Iceberg's S3FileIO. That was not the plan -- see the
-# comment on io-impl below for the constraint that forced it.
+# Table IO goes through Iceberg's own S3FileIO. Streaming checkpoints do not -- they are plain
+# s3a:// paths in a separate bucket, handled by the Hadoop S3A connector, which is why hadoop-aws
+# stays on the classpath. See checkpoint_path() below for why the two are kept apart.
 
 ICEBERG_CATALOG = "iceberg"
 
@@ -78,32 +79,26 @@ def configure_iceberg(builder, env: dict | None = None):
         .config(f"{prefix}.type", "rest")
         .config(f"{prefix}.uri", settings["uri"])
         .config(f"{prefix}.warehouse", settings["warehouse"])
-        # HadoopFileIO, not S3FileIO, and the reason is a hard constraint rather than a preference.
+        # S3FileIO -- Iceberg's own S3 client, on the AWS SDK v2, rather than routing table IO
+        # through the Hadoop FileSystem abstraction. It is the current default for Iceberg on
+        # object storage and the reason iceberg-aws-bundle is in the package list.
         #
-        # S3FileIO can only parse s3:// URIs, and Iceberg's micro-batch streaming source writes its
-        # offset log through the *table's* FileIO whatever filesystem the checkpoint lives on. So
-        # with S3FileIO the checkpoint must be on S3 -- but a REST catalog hands that FileIO a
-        # signer endpoint bound to one table id, and rejects any location that is not that table.
-        # Lakekeeper offers no way out: with flavor=s3-compat and sts-enabled=false, remote signing
-        # is its only credential-delivery mechanism, and the REST spec gives server config
-        # precedence over the client's.
-        #
-        # HadoopFileIO goes through the Hadoop FileSystem abstraction, which handles file:// and
-        # s3a:// alike, so checkpoints can live on a volume and table data on object storage. The
-        # cost is credential vending: engines authenticate to S3 directly with the credentials in
-        # their environment. The catalog still owns metadata, which is the substance of the move
-        # off Hive Metastore.
+        # Getting here took a wrong turn worth recording. Iceberg's micro-batch streaming source
+        # writes its offset log through the *table's* FileIO, and under a REST catalog with remote
+        # signing on, that FileIO is handed a signer endpoint bound to one table id -- so the
+        # checkpoint is rejected as a location that is not that table. The apparent fix was to
+        # abandon S3FileIO for HadoopFileIO. The real fix was to turn remote signing off on the
+        # *catalog*, which scripts/init_iceberg_catalog.py now does explicitly; setting it on the
+        # engine achieves nothing, because the REST spec gives server config precedence.
         .config(f"{prefix}.io-impl", "org.apache.iceberg.aws.s3.S3FileIO")
-        # The catalog records table locations as s3://. Hadoop registers no s3 scheme, so map it
-        # onto S3A or every read fails with "No FileSystem for scheme s3".
-        .config("spark.hadoop.fs.s3.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
         .config(f"{prefix}.s3.endpoint", settings["s3_endpoint"])
         # MinIO addresses buckets by path, not DNS subdomain. Real S3 accepts path style too.
         .config(f"{prefix}.s3.path-style-access", "true")
-        # Remote signing off. With it on, the catalog signs every S3FileIO request -- including
-        # the Structured Streaming offset files, which belong to no table, so the catalog rejects
-        # them with "Table does not exist ... at location s3://checkpoints/...". Engines
-        # authenticate to S3 directly with the credentials in the environment instead.
+        # Remote signing off. This line alone does nothing -- the server's value wins -- and the
+        # setting that actually takes effect is applied to the warehouse by
+        # scripts/init_iceberg_catalog.py. It is kept because it states the engine's expectation:
+        # if someone re-enables signing on the catalog, the mismatch is visible here rather than
+        # only in a streaming job that fails eleven minutes into a run.
         .config(f"{prefix}.s3.remote-signing-enabled", "false")
         .config(f"{prefix}.client.region", settings["s3_region"])
         # Structured Streaming checkpoints are plain s3a:// paths, not Iceberg tables, so they go
@@ -121,25 +116,29 @@ def configure_iceberg(builder, env: dict | None = None):
 
 
 def checkpoint_path(layer: str, env: dict | None = None) -> str:
-    """Structured Streaming checkpoint location for a layer -- a mounted volume, not object storage.
+    """Structured Streaming checkpoint location for a layer -- its own bucket, not the warehouse.
 
     Checkpoints deliberately do *not* live in the warehouse bucket, and the reason is the sharpest
     thing this migration taught.
 
     Iceberg's micro-batch source writes its offset log through the *table's* FileIO. Under a REST
-    catalog that FileIO is handed per-table configuration -- `loadTable` returns
-    `s3.remote-signing-enabled=true` with a signer endpoint bound to one table id, and a credential
-    scoped to that table's own prefix. So a checkpoint written through it gets signed as if it
-    belonged to the table, and the catalog correctly refuses a location that is not that table:
+    catalog with remote signing on, that FileIO is handed per-table configuration -- `loadTable`
+    returns a signer endpoint bound to one table id and a credential scoped to that table's own
+    prefix. So a checkpoint written through it gets signed as if it belonged to the table, and the
+    catalog correctly refuses a location that is not that table:
 
         Table does not exist ... at location `s3://checkpoints/silver/sources/0/offsets/0`
 
-    Setting `s3.remote-signing-enabled=false` on the engine does nothing, because the REST spec
-    gives the server's config precedence over the client's.
+    Signing is therefore disabled on the warehouse itself (scripts/init_iceberg_catalog.py); doing
+    it on the engine has no effect, because the REST spec gives the server's config precedence.
 
-    This never arose on HDFS, where checkpoints and tables shared one ungoverned filesystem. The
-    resolution is not to fight the governance but to respect the boundary it draws: a checkpoint is
-    *engine state*, not lakehouse data, and it has no business inside a governed warehouse.
+    That fixes the error, but the separation stays regardless: a checkpoint is *engine state*, not
+    lakehouse data, and it has no business inside a governed warehouse. Two buckets also mean
+    resetting a stream can never touch table data. This never arose on HDFS, where checkpoints and
+    tables shared one ungoverned filesystem.
+
+    The path is `s3a://`, not `s3://`: this one goes through the Hadoop S3A connector rather than
+    S3FileIO, since it is a plain filesystem write with no table behind it.
     """
     import os
 

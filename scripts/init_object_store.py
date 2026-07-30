@@ -31,9 +31,11 @@ DEFAULTS = {
     "S3_SECRET_KEY": "",
 }
 
-# Only the warehouse. Streaming checkpoints deliberately live on a volume rather than in object
-# storage -- see checkpoint_path() in config/spark/jobs/common.py for why a governed bucket cannot
-# hold them.
+# Two buckets, not one. Table data belongs to the catalog's governed warehouse; Structured
+# Streaming checkpoints are engine state that belongs to no table, and putting them in the
+# warehouse is what a REST catalog rejects -- see checkpoint_path() in
+# config/spark/jobs/common.py. Separate buckets also mean resetting a stream can never reach
+# Iceberg data.
 BUCKETS = ("warehouse", "checkpoints")
 
 
