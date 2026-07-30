@@ -101,3 +101,17 @@ def test_warehouse_payload_uses_path_style_addressing() -> None:
     assert payload["storage-profile"]["path-style-access"] is True
     assert payload["storage-profile"]["endpoint"] == "http://minio:9000"
     assert payload["storage-credential"]["aws-access-key-id"] == "k"
+
+
+def test_warehouse_disables_remote_signing() -> None:
+    """Signing must be off in the *code that creates the warehouse*, not just on a running one.
+
+    This was first fixed by PATCHing a live warehouse through the management API, which fixed the
+    instance and not the repo. The next cluster built from scratch recreated the warehouse with
+    signing on and silver failed again, in exactly the same way, eleven minutes into the run.
+    """
+    payload = module.warehouse_payload(
+        module.settings({"S3_ACCESS_KEY": "k", "S3_SECRET_KEY": "s"})
+    )
+
+    assert payload["storage-profile"]["remote-signing-enabled"] is False

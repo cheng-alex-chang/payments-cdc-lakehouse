@@ -32,7 +32,7 @@ done
 KUBECTL=(kubectl --kubeconfig "${KUBECONFIG_PATH}")
 
 "${KUBECTL[@]}" get namespace "${NAMESPACE}" >/dev/null
-"${KUBECTL[@]}" get configmap hadoop-config -n "${NAMESPACE}" >/dev/null
+"${KUBECTL[@]}" get configmap trino-catalog -n "${NAMESPACE}" >/dev/null
 "${KUBECTL[@]}" get secret platform-secrets -n "${NAMESPACE}" >/dev/null
 
 failed=()

@@ -79,8 +79,6 @@ spec:
               subPath: node.properties
             - name: trino-catalog
               mountPath: /etc/trino/catalog
-            - name: hadoop-config
-              mountPath: /etc/hadoop/conf
             - name: trino-data
               mountPath: /var/trino/data
       volumes:
@@ -90,8 +88,5 @@ spec:
         - name: trino-catalog
           configMap:
             name: trino-catalog
-        - name: hadoop-config
-          configMap:
-            name: hadoop-config
         - name: trino-data
           emptyDir: {}

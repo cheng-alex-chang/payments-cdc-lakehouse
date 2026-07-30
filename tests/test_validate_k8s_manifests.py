@@ -916,3 +916,56 @@ def test_shell_scripts_reference_no_deleted_paths() -> None:
             assert (REPO_ROOT / candidate).exists(), (
                 f"{script.name} references {candidate}, which does not exist"
             )
+
+
+def test_verify_script_checks_only_configmaps_that_exist() -> None:
+    """k8s_verify.sh asserted `hadoop-config` for a full cluster spin-up after it was deleted.
+
+    Same class as the workload arrays: a hand-written name that must match generated output, with
+    nothing comparing them. The failure is expensive because it lands eleven minutes in, after the
+    platform is already up.
+    """
+    import re
+
+    text = (REPO_ROOT / "scripts" / "k8s_verify.sh").read_text(encoding="utf-8")
+    asserted = set(re.findall(r"get configmap (\S+)", text))
+
+    kustomization = yaml.safe_load((K8S_BASE / "kustomization.yaml").read_text(encoding="utf-8"))
+    generated = {entry["name"] for entry in kustomization.get("configMapGenerator", [])}
+    for path in sorted(K8S_BASE.glob("*.yaml")):
+        for doc in yaml.safe_load_all(path.read_text(encoding="utf-8")):
+            if doc and doc.get("kind") == "ConfigMap":
+                generated.add(doc["metadata"]["name"])
+
+    missing = asserted - generated
+    assert not missing, f"k8s_verify.sh checks ConfigMaps that are never generated: {sorted(missing)}"
+
+
+def test_every_configmap_volume_references_one_that_exists() -> None:
+    """A volume naming a deleted ConfigMap blocks the pod at ContainerCreating, not at apply.
+
+    Deleting the hadoop-config generator in Phase 4 left three references behind -- k8s_up.sh, the
+    verify script, and a volume in trino.yaml. The first two failed fast; this one wedged Trino in
+    ContainerCreating with FailedMount for seven minutes and did not surface until the whole
+    platform had otherwise come up.
+
+    kubectl apply accepts it happily: a volume may name a ConfigMap that does not exist yet. That
+    tolerance is deliberate and useful, and it is exactly why it needs a check here.
+    """
+    kustomization = yaml.safe_load((K8S_BASE / "kustomization.yaml").read_text(encoding="utf-8"))
+    available = {entry["name"] for entry in kustomization.get("configMapGenerator", [])}
+    referenced: list[tuple[str, str]] = []
+
+    for path in sorted(K8S_BASE.glob("*.yaml")):
+        for doc in yaml.safe_load_all(path.read_text(encoding="utf-8")):
+            if not doc:
+                continue
+            if doc.get("kind") == "ConfigMap":
+                available.add(doc["metadata"]["name"])
+            spec = doc.get("spec", {}).get("template", {}).get("spec", {})
+            for volume in spec.get("volumes", []):
+                if "configMap" in volume:
+                    referenced.append((doc["metadata"]["name"], volume["configMap"]["name"]))
+
+    dangling = sorted({f"{owner} -> {name}" for owner, name in referenced if name not in available})
+    assert not dangling, f"volumes reference ConfigMaps that are never created: {dangling}"

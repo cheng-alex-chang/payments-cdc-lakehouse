@@ -65,6 +65,14 @@ def warehouse_payload(resolved: dict[str, str]) -> dict[str, Any]:
             "path-style-access": True,
             "flavor": "s3-compat",
             "sts-enabled": False,
+            # Remote signing off, and this is not optional. With it on, the catalog hands each
+            # table's FileIO a signer endpoint bound to that table's id -- and Iceberg's streaming
+            # source writes its offset log through that same FileIO, so the checkpoint is rejected
+            # as "Table does not exist at location s3://checkpoints/...". The engine cannot opt
+            # out: the Iceberg REST spec gives the server's config precedence over the client's.
+            # With signing off the catalog returns no access key and engines authenticate to
+            # storage from their own environment, which is what real-AWS deployments do via STS.
+            "remote-signing-enabled": False,
         },
         "storage-credential": {
             "type": "s3",
@@ -119,6 +127,43 @@ def create_warehouse(
         )
 
 
+def warehouse_id(base_url: str, name: str, session: Any | None = None) -> str | None:
+    http = session if session is not None else requests
+    response = http.get(f"{base_url}/management/v1/warehouse", timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+    for warehouse in response.json().get("warehouses", []):
+        if warehouse.get("name") == name:
+            return warehouse.get("id")
+    return None
+
+
+def disable_remote_signing(
+    base_url: str, wh_id: str, payload: dict[str, Any], session: Any | None = None
+) -> None:
+    """Re-send the storage profile through the update endpoint, which honours the signing flag.
+
+    Lakekeeper accepts `remote-signing-enabled: false` in a warehouse *creation* body and stores
+    `true` anyway -- verified by creating a warehouse from this script's payload and reading the
+    profile back. The same field on POST /warehouse/{id}/storage is honoured. So the setting is
+    applied as an explicit second step rather than trusted to the create call.
+
+    Idempotent: re-sending an identical profile is a no-op.
+    """
+    http = session if session is not None else requests
+    response = http.post(
+        f"{base_url}/management/v1/warehouse/{wh_id}/storage",
+        json={
+            "storage-profile": payload["storage-profile"],
+            "storage-credential": payload["storage-credential"],
+        },
+        timeout=REQUEST_TIMEOUT,
+    )
+    if not response.ok:
+        raise RuntimeError(
+            f"could not disable remote signing ({response.status_code}): {response.text[:400]}"
+        )
+
+
 def main() -> None:
     resolved = settings()
     base_url = resolved["ICEBERG_REST_URL"].rstrip("/")
@@ -126,11 +171,18 @@ def main() -> None:
 
     LOGGER.info("  %s server bootstrap", "performed" if bootstrap(base_url) else "already done:")
 
+    payload = warehouse_payload(resolved)
     if warehouse_exists(base_url, name):
         LOGGER.info("  exists   warehouse %s", name)
     else:
-        create_warehouse(base_url, warehouse_payload(resolved))
+        create_warehouse(base_url, payload)
         LOGGER.info("  created  warehouse %s", name)
+
+    wh_id = warehouse_id(base_url, name)
+    if wh_id is None:
+        raise RuntimeError(f"warehouse {name} not found after registration")
+    disable_remote_signing(base_url, wh_id, payload)
+    LOGGER.info("  applied  storage profile (remote signing off)")
 
     LOGGER.info("Iceberg REST catalog ready")
 

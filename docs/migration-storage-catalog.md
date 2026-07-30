@@ -29,15 +29,25 @@ Kafka and Postgres rather than copied — no dual-write window, no partial state
 Memory figures are the sum of declared `requests` and `limits` across every Deployment and
 StatefulSet in `k8s/base`.
 
-| Measure | Before (HDFS + Hive Metastore) | After | Change |
+| Measure | Before (HDFS + Hive Metastore) | After (MinIO + REST catalog) | Change |
 |---|---:|---:|---|
-| Workloads (Deployments + StatefulSets) | 16 | _tbd_ | |
-| Memory requests | 6,304 Mi (6.16 GiB) | _tbd_ | |
-| Memory limits | 12,096 Mi (11.81 GiB) | _tbd_ | |
-| PersistentVolumeClaims | 6 | _tbd_ | |
-| Pods running | 18 | _tbd_ | |
-| Resident memory, kind node | 6.12 GiB / 11.67 GiB (52%) | _tbd_ | |
-| Wall clock, `k8s_up.sh` to all-ready | 5m 14s | _tbd_ | |
+| Workloads (Deployments + StatefulSets) | 16 | **15** | −1 |
+| Memory requests | 6,304 Mi (6.16 GiB) | **4,704 Mi (4.59 GiB)** | **−1,600 Mi** |
+| Memory limits | 12,096 Mi (11.81 GiB) | **9,024 Mi (8.81 GiB)** | **−3,072 Mi** |
+| PersistentVolumeClaims | 6 | 6 | none |
+| Pods running | 18 | 18 | none |
+| Resident memory, kind node | 6.12 GiB | 7.22 GiB | +1.1 GiB |
+
+Two numbers deserve honesty rather than spin.
+
+**PVC count did not improve.** HDFS's two go, MinIO adds one, and Spark's streaming checkpoints
+were briefly given one of their own before that approach was abandoned. Six before, six after.
+
+**Resident memory went up, not down.** 6.12 GiB to 7.22 GiB, measured on a cluster that had just
+finished a pipeline run rather than one sitting idle, so the two figures are not like-for-like. The
+honest claim is about *declared* limits — the number that decides whether the platform fits in its
+Docker allocation and whether one bad heap takes out its neighbours. That fell from 11.81 GiB to
+8.81 GiB: from 200 MiB under a 12 GB ceiling to three gigabytes of headroom.
 
 Live figures come from a clean `k8s_up.sh` on the last HDFS build, measured with
 `docker stats --no-stream` on the kind node once `k8s_verify.sh` reported all 16 workloads ready.
@@ -155,6 +165,37 @@ checkpoint as query state. Neither is wrong, and nothing negotiated between them
 remote signing resolves it by moving that decision back to the engine: the catalog owns metadata,
 engines authenticate to storage themselves. On real AWS the equivalent choice is STS with vended
 credentials, where the same question arises as an IAM policy scope.
+
+**Phases 4 and 5 — deleting a thing is not one edit.** Removing the `hadoop-config` ConfigMap left
+three live references behind, and each failed differently:
+
+* `scripts/k8s_up.sh` still built an image from the deleted `config/hive-metastore/`. Fails at
+  minute one of a cold start.
+* `scripts/k8s_verify.sh` still asserted the ConfigMap existed. Fails at minute eleven, after the
+  platform is otherwise up.
+* `k8s/base/trino.yaml` still mounted it as a volume. Does not fail at all — `kubectl apply`
+  accepts a volume naming a ConfigMap that does not exist, and the pod sits in `ContainerCreating`
+  with `FailedMount` until someone reads the events.
+
+All three now have guards: shell scripts may not reference paths that do not exist, the verify
+script may not assert ConfigMaps that are never generated, and no volume may name a ConfigMap that
+is never created.
+
+**Phase 5 — fixing the instance is not fixing the repo.** Remote signing was first turned off by
+PATCHing the *running* warehouse through the management API. The repo never changed, so the next
+cluster built from scratch recreated the warehouse with signing on and silver failed identically,
+eleven minutes in. This is the single best argument for Phase 5 existing at all: every earlier
+verification ran against a cluster that had been hand-corrected.
+
+The fix then needed a second discovery. Lakekeeper accepts `remote-signing-enabled: false` in a
+warehouse *creation* body and stores `true` anyway; the same field on
+`POST /warehouse/{id}/storage` is honoured. `scripts/init_iceberg_catalog.py` now applies the
+storage profile as an explicit second step rather than trusting the create call.
+
+**Operational note worth knowing.** Trino resolves the warehouse prefix from `/v1/config` once, at
+catalog initialisation. Deleting and recreating a warehouse under a running Trino leaves it holding
+a stale UUID, and every query fails with `Schema 'analytics' does not exist`. Engines must be
+restarted after a warehouse is recreated.
 
 ## Verification
 
