@@ -22,6 +22,7 @@ resources:
   - trino.yaml
   - kafka.yaml
   - spark.yaml
+  - spark-checkpoints.yaml
   - airflow.yaml
   - api.yaml
   - observability.yaml

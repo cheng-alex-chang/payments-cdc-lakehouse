@@ -73,7 +73,12 @@ def test_make_bucket_propagates_real_failures() -> None:
 
 
 def test_buckets_separate_table_data_from_streaming_checkpoints() -> None:
-    # Resetting Spark checkpoints must never be able to touch Iceberg data.
+    """Two buckets, so resetting Spark checkpoints can never touch Iceberg data.
+
+    Checkpoints have to live in object storage rather than on a volume: Iceberg's streaming source
+    writes its offset log through the table's S3FileIO, which can only address s3 URIs. Keeping
+    them in a separate bucket is what stops that from meaning "in with the tables".
+    """
     assert module.BUCKETS == ("warehouse", "checkpoints")
 
 

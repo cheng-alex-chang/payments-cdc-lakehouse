@@ -233,6 +233,7 @@ services:
     ports:
       - "4040:4040"
     volumes:
+      - spark_checkpoints:/checkpoints
       - .:/opt/project
       - ./config/hadoop/core-site.xml:/opt/spark/conf/core-site.xml
       - ./config/hadoop/hdfs-site.xml:/opt/spark/conf/hdfs-site.xml
@@ -427,6 +428,7 @@ services:
 
 volumes:
   postgres_data:
+  spark_checkpoints:
   minio_data:
   namenode_data:
   datanode_data:

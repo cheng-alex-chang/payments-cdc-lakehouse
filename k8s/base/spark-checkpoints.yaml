@@ -1,0 +1,26 @@
+# Structured Streaming checkpoints for the bronze and silver jobs.
+#
+# Deliberately not in the warehouse bucket. Iceberg's micro-batch source writes its offset log
+# through the table's FileIO, which a REST catalog scopes to one table -- so a checkpoint written
+# there is signed as if it belonged to that table and rejected. See checkpoint_path() in
+# config/spark/jobs/common.py and docs/migration-storage-catalog.md.
+#
+# The boundary is the right one regardless of the error: a checkpoint is engine state, not
+# lakehouse data, and does not belong inside governed storage.
+#
+# ReadWriteOnce is sufficient because the medallion jobs run strictly in sequence -- bronze
+# completes before silver starts. A cluster running them concurrently would need ReadWriteMany.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: spark-checkpoints
+  namespace: data-pipeline
+  labels:
+    app.kubernetes.io/name: spark
+    app.kubernetes.io/component: processing
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi

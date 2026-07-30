@@ -46,10 +46,8 @@ def normalize_payment(record: dict) -> dict:
 # anything about MinIO: the endpoint is a value, so pointing this at real S3 changes configuration
 # rather than code.
 #
-# io-impl is S3FileIO -- Iceberg's own AWS SDK v2 client -- rather than the Hadoop S3A connector.
-# A filesystem-backed catalog would force s3a:// because it resolves its warehouse directory
-# through the Hadoop FileSystem API, but a REST catalog does not live on a filesystem, so that
-# constraint disappears along with the hadoop-aws dependency.
+# File IO goes through Hadoop rather than Iceberg's S3FileIO. That was not the plan -- see the
+# comment on io-impl below for the constraint that forced it.
 
 ICEBERG_CATALOG = "iceberg"
 
@@ -80,7 +78,25 @@ def configure_iceberg(builder, env: dict | None = None):
         .config(f"{prefix}.type", "rest")
         .config(f"{prefix}.uri", settings["uri"])
         .config(f"{prefix}.warehouse", settings["warehouse"])
+        # HadoopFileIO, not S3FileIO, and the reason is a hard constraint rather than a preference.
+        #
+        # S3FileIO can only parse s3:// URIs, and Iceberg's micro-batch streaming source writes its
+        # offset log through the *table's* FileIO whatever filesystem the checkpoint lives on. So
+        # with S3FileIO the checkpoint must be on S3 -- but a REST catalog hands that FileIO a
+        # signer endpoint bound to one table id, and rejects any location that is not that table.
+        # Lakekeeper offers no way out: with flavor=s3-compat and sts-enabled=false, remote signing
+        # is its only credential-delivery mechanism, and the REST spec gives server config
+        # precedence over the client's.
+        #
+        # HadoopFileIO goes through the Hadoop FileSystem abstraction, which handles file:// and
+        # s3a:// alike, so checkpoints can live on a volume and table data on object storage. The
+        # cost is credential vending: engines authenticate to S3 directly with the credentials in
+        # their environment. The catalog still owns metadata, which is the substance of the move
+        # off Hive Metastore.
         .config(f"{prefix}.io-impl", "org.apache.iceberg.aws.s3.S3FileIO")
+        # The catalog records table locations as s3://. Hadoop registers no s3 scheme, so map it
+        # onto S3A or every read fails with "No FileSystem for scheme s3".
+        .config("spark.hadoop.fs.s3.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
         .config(f"{prefix}.s3.endpoint", settings["s3_endpoint"])
         # MinIO addresses buckets by path, not DNS subdomain. Real S3 accepts path style too.
         .config(f"{prefix}.s3.path-style-access", "true")
@@ -105,10 +121,25 @@ def configure_iceberg(builder, env: dict | None = None):
 
 
 def checkpoint_path(layer: str, env: dict | None = None) -> str:
-    """Structured Streaming checkpoint location for a layer.
+    """Structured Streaming checkpoint location for a layer -- a mounted volume, not object storage.
 
-    Kept in its own bucket so resetting checkpoints can never touch table data -- the same reason
-    init_object_store.py creates two buckets rather than one.
+    Checkpoints deliberately do *not* live in the warehouse bucket, and the reason is the sharpest
+    thing this migration taught.
+
+    Iceberg's micro-batch source writes its offset log through the *table's* FileIO. Under a REST
+    catalog that FileIO is handed per-table configuration -- `loadTable` returns
+    `s3.remote-signing-enabled=true` with a signer endpoint bound to one table id, and a credential
+    scoped to that table's own prefix. So a checkpoint written through it gets signed as if it
+    belonged to the table, and the catalog correctly refuses a location that is not that table:
+
+        Table does not exist ... at location `s3://checkpoints/silver/sources/0/offsets/0`
+
+    Setting `s3.remote-signing-enabled=false` on the engine does nothing, because the REST spec
+    gives the server's config precedence over the client's.
+
+    This never arose on HDFS, where checkpoints and tables shared one ungoverned filesystem. The
+    resolution is not to fight the governance but to respect the boundary it draws: a checkpoint is
+    *engine state*, not lakehouse data, and it has no business inside a governed warehouse.
     """
     import os
 

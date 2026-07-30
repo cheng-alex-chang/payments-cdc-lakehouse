@@ -109,46 +109,52 @@ sufficient on its own. **The filesystem-catalog-on-object-storage combination th
 known anti-pattern anyway** — it cannot do atomic commits — so hitting the wall was a signal the
 target architecture is the right one, not a detour around it.
 
-**Phase 3 — the streaming checkpoint is the open problem.** Bronze migrated cleanly: 50,004 rows
-written to Iceberg on MinIO through the REST catalog, readable from Trino. Silver does not, and the
-reason is specific:
-
-```
-BadRequestException: Malformed request: Table does not exist or user does not have
-permission to view it at location `s3://checkpoints/silver/sources/0/offsets/0`
-in warehouse `03039098-...`
-```
+**Phase 3 — remote signing versus streaming checkpoints.** This cost four cluster runs and was
+the only genuinely hard part of the migration. Worth recording in full, because the wrong diagnosis
+survived three of those runs.
 
 Silver reads bronze as an Iceberg stream, and Iceberg's micro-batch source writes its offset log
-through the **table's** FileIO. Asking the catalog what config that FileIO gets shows exactly why
-that fails — `loadTable` returns, per table:
+through the **table's** FileIO rather than through Spark's checkpoint manager. Under a REST catalog
+that FileIO is configured by the catalog, per table. Lakekeeper was returning:
 
 ```
 "s3.remote-signing-enabled": "true"
 "s3.signer.endpoint": ".../tabular-id/019fb10d-.../v1/aws/s3/sign"
-"storage-credentials": [{"prefix": "s3://warehouse/iceberg/019fb10d-..."}]
 ```
 
-Every S3 request from that FileIO is signed at an endpoint **bound to one table id**, and the
-vended credential is scoped to that table's prefix. The checkpoint file goes through the same
-FileIO, gets signed at the table-scoped endpoint, and the catalog correctly refuses a location that
-is not that table.
+Every S3 request from that FileIO went to the catalog to be signed, at an endpoint bound to **one
+table id** — so the checkpoint write was rejected, correctly:
 
-Setting `s3.remote-signing-enabled=false` on the client had no effect, and the reason is worth
-knowing: in the Iceberg REST spec the **server's** config wins over the client's. You cannot opt
-out of signing from the engine side.
+```
+Table does not exist or user does not have permission to view it
+at location `s3://checkpoints/silver/sources/0/offsets/0`
+```
 
-This never arose on HDFS because the checkpoint filesystem and the table filesystem were the same
-unscoped `hdfs://`. It is a real consequence of a catalog that governs storage access, not a
-configuration slip. Candidate resolutions, none yet tried:
+Two attempted fixes failed, and both failures were informative:
 
-1. Move checkpoints inside the warehouse prefix so they fall under the catalog's scope.
-2. Keep checkpoints on a PVC rather than object storage — small, node-local, and arguably where
-   streaming offsets belong.
-3. Give the streaming source a separate unscoped FileIO via `spark.sql.catalog` overrides.
+* Setting `s3.remote-signing-enabled=false` **on the engine** did nothing. The Iceberg REST spec
+  gives the server's config precedence; you cannot opt out of signing from the client side.
+* Moving checkpoints to a PersistentVolume produced `Invalid S3 URI, cannot determine scheme:
+  file:/checkpoints/silver/...`. `S3FileIO` only parses `s3` URIs, and the offset log goes through
+  it wherever the checkpoint lives. **The location was never the problem.**
 
-Option 2 is probably right: checkpoints are engine state, not lakehouse data, and putting them in
-the governed warehouse conflates the two.
+The actual fix is one field on the warehouse's storage profile:
+`"remote-signing-enabled": false`. With it off, the catalog stops signing and returns no access
+key, so engines authenticate to storage with the credentials in their own environment. Checkpoints
+in a separate bucket then work, and `S3FileIO` is kept — no `HadoopFileIO`, no `hadoop-aws` in the
+table read path.
+
+**How the wrong turn happened, since it is the more useful lesson.** I concluded that field did not
+exist, and switched to `HadoopFileIO` on that basis. It did exist — my `grep` for `signing` matched
+`remote-signing-url-style`, and the output was truncated before reaching `remote-signing-enabled`
+two lines later. A filtered view of a config object was mistaken for the config object.
+
+**What this means architecturally.** A catalog that governs storage access has to decide what a
+checkpoint *is*. Lakekeeper treats every S3 path as table data; Structured Streaming treats the
+checkpoint as query state. Neither is wrong, and nothing negotiated between them. Turning off
+remote signing resolves it by moving that decision back to the engine: the catalog owns metadata,
+engines authenticate to storage themselves. On real AWS the equivalent choice is STS with vended
+credentials, where the same question arises as an IAM policy scope.
 
 ## Verification
 

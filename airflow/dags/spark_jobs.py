@@ -117,6 +117,14 @@ def _kubernetes_operator(task_id: str, layer: str) -> Any:
             ),
         ],
         volumes=[
+            # Streaming checkpoints live on a volume, not in the warehouse bucket -- a REST
+            # catalog scopes storage access per table, and a checkpoint belongs to no table.
+            k8s.V1Volume(
+                name="checkpoints",
+                persistent_volume_claim=k8s.V1PersistentVolumeClaimVolumeSource(
+                    claim_name="spark-checkpoints"
+                ),
+            ),
             k8s.V1Volume(
                 name="spark-jobs",
                 config_map=k8s.V1ConfigMapVolumeSource(name="spark-jobs"),
@@ -127,6 +135,7 @@ def _kubernetes_operator(task_id: str, layer: str) -> Any:
             ),
         ],
         volume_mounts=[
+            k8s.V1VolumeMount(name="checkpoints", mount_path="/checkpoints"),
             k8s.V1VolumeMount(name="spark-jobs", mount_path=JOBS_DIR),
             # subPath, not a directory mount: mounting the ConfigMap over /opt/spark/conf would
             # replace the image's Spark configuration wholesale.

@@ -1043,3 +1043,20 @@ def test_payment_aggregate_panels_read_gold_via_trino() -> None:
         matches = [p for title, p in by_title.items() if title.startswith(prefix)]
         assert len(matches) == 1, prefix
         assert matches[0]["datasource"]["uid"] == "payments-postgres", prefix
+
+
+def test_streaming_checkpoints_are_addressable_by_s3fileio() -> None:
+    """Checkpoints must carry an s3 scheme, and it must not be a bare path.
+
+    Iceberg's micro-batch source writes its offset log through the *table's* FileIO, which is
+    S3FileIO -- and S3FileIO can only parse s3 URIs. A `file://` checkpoint fails with "Invalid S3
+    URI, cannot determine scheme", and a bare `/path` resolves against Spark's default filesystem
+    (HDFS, per core-site.xml) rather than object storage. Both fail only once a job is running.
+    """
+    from common import checkpoint_path
+
+    for layer in ("bronze", "silver"):
+        path = checkpoint_path(layer, env={})
+        assert path.startswith(("s3://", "s3a://")), (
+            f"{layer} checkpoint must be on object storage for S3FileIO to address it, got {path}"
+        )

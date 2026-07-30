@@ -31,8 +31,9 @@ DEFAULTS = {
     "S3_SECRET_KEY": "",
 }
 
-# The warehouse holds Iceberg data and metadata; checkpoints hold Spark Structured Streaming
-# offsets. Separate buckets so a checkpoint reset never risks touching table data.
+# Only the warehouse. Streaming checkpoints deliberately live on a volume rather than in object
+# storage -- see checkpoint_path() in config/spark/jobs/common.py for why a governed bucket cannot
+# hold them.
 BUCKETS = ("warehouse", "checkpoints")
 
 
