@@ -115,14 +115,9 @@ spec:
             limits:
               memory: 2Gi
           volumeMounts:
-            - name: checkpoints
-              mountPath: /checkpoints
             - name: spark-jobs
               mountPath: /opt/project/config/spark/jobs
       volumes:
-        - name: checkpoints
-          persistentVolumeClaim:
-            claimName: spark-checkpoints
         - name: spark-jobs
           configMap:
             name: spark-jobs
@@ -183,14 +178,9 @@ spec:
             limits:
               memory: 2Gi
           volumeMounts:
-            - name: checkpoints
-              mountPath: /checkpoints
             - name: spark-jobs
               mountPath: /opt/project/config/spark/jobs
       volumes:
-        - name: checkpoints
-          persistentVolumeClaim:
-            claimName: spark-checkpoints
         - name: spark-jobs
           configMap:
             name: spark-jobs
@@ -251,14 +241,9 @@ spec:
             limits:
               memory: 2Gi
           volumeMounts:
-            - name: checkpoints
-              mountPath: /checkpoints
             - name: spark-jobs
               mountPath: /opt/project/config/spark/jobs
       volumes:
-        - name: checkpoints
-          persistentVolumeClaim:
-            claimName: spark-checkpoints
         - name: spark-jobs
           configMap:
             name: spark-jobs

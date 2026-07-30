@@ -115,22 +115,16 @@ def _kubernetes_operator(task_id: str, layer: str) -> Any:
                 ),
             ),
         ],
+        # Only the job scripts. Streaming checkpoints are s3a:// paths in their own bucket --
+        # see checkpoint_path() in config/spark/jobs/common.py -- so these pods mount no
+        # persistent claim and any node can run them.
         volumes=[
-            # Streaming checkpoints live on a volume, not in the warehouse bucket -- a REST
-            # catalog scopes storage access per table, and a checkpoint belongs to no table.
-            k8s.V1Volume(
-                name="checkpoints",
-                persistent_volume_claim=k8s.V1PersistentVolumeClaimVolumeSource(
-                    claim_name="spark-checkpoints"
-                ),
-            ),
             k8s.V1Volume(
                 name="spark-jobs",
                 config_map=k8s.V1ConfigMapVolumeSource(name="spark-jobs"),
             ),
         ],
         volume_mounts=[
-            k8s.V1VolumeMount(name="checkpoints", mount_path="/checkpoints"),
             k8s.V1VolumeMount(name="spark-jobs", mount_path=JOBS_DIR),
         ],
     )
