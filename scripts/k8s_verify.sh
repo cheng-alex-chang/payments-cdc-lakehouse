@@ -20,7 +20,7 @@ NAMESPACE=data-pipeline
 TIMEOUT="${VERIFY_TIMEOUT:-300s}"
 
 STATEFULSETS=(airflow-postgres datanode kafka metastore-db namenode postgres)
-DEPLOYMENTS=(airflow-scheduler airflow-webserver api grafana hive-metastore kafka-connect prometheus statsd-exporter trino trino-exporter)
+DEPLOYMENTS=(airflow-scheduler airflow-webserver api grafana hive-metastore kafka-connect minio prometheus statsd-exporter trino trino-exporter)
 
 for command in kubectl; do
   if ! command -v "${command}" >/dev/null 2>&1; then

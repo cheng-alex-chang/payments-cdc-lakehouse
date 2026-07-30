@@ -1,0 +1,121 @@
+# S3-compatible object storage for the Iceberg warehouse.
+#
+# Replaces HDFS. Iceberg does not care what sits underneath it, and every cloud deployment of this
+# architecture would use S3, so running HDFS on a single-node cluster bought nothing but two
+# StatefulSets, two PVCs, and a pair of JVM heaps to tune.
+#
+# MinIO speaks the S3 API, so the same Spark and Trino configuration works unchanged against real
+# S3 -- only the endpoint and credentials differ. See docs/migration-storage-catalog.md.
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: data-pipeline
+  labels:
+    app.kubernetes.io/name: minio
+    app.kubernetes.io/component: storage
+spec:
+  selector:
+    app.kubernetes.io/name: minio
+  ports:
+    - name: s3
+      port: 9000
+      targetPort: s3
+    - name: console
+      port: 9001
+      targetPort: console
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: data-pipeline
+  labels:
+    app.kubernetes.io/name: minio
+    app.kubernetes.io/component: storage
+spec:
+  replicas: 1
+  # The PVC is ReadWriteOnce, so two pods could never mount it at once. Recreate avoids a rolling
+  # update deadlocking on a volume the outgoing pod still holds.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: minio
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minio
+        app.kubernetes.io/component: storage
+    spec:
+      containers:
+        - name: minio
+          image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+          args:
+            - server
+            - /data
+            - --console-address
+            - ":9001"
+          # Go, not a JVM: no heap to size, and the footprint is a fraction of what the NameNode
+          # and DataNode together reserved (1536 Mi of requests, 3072 Mi of limits).
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+          ports:
+            - name: s3
+              containerPort: 9000
+            - name: console
+              containerPort: 9001
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: platform-secrets
+                  key: MINIO_ROOT_USER
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: platform-secrets
+                  key: MINIO_ROOT_PASSWORD
+          # /minio/health/live is served on the S3 port and does not require credentials.
+          readinessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: s3
+            timeoutSeconds: 3
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: s3
+            timeoutSeconds: 3
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          volumeMounts:
+            - name: minio-data
+              mountPath: /data
+      volumes:
+        - name: minio-data
+          persistentVolumeClaim:
+            claimName: minio-data
+---
+# A Deployment cannot use volumeClaimTemplates (those are StatefulSet-only, one PVC per pod
+# ordinal). A single named PVC is the right shape here: one replica, one volume.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio-data
+  namespace: data-pipeline
+  labels:
+    app.kubernetes.io/name: minio
+    app.kubernetes.io/component: storage
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 4Gi

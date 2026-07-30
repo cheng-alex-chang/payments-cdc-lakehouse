@@ -33,5 +33,9 @@ secretGenerator:
       - AIRFLOW_DB=airflow
       - AIRFLOW_USER=airflow
       - AIRFLOW_ADMIN_USERNAME=admin
+      # MinIO's root user doubles as the S3 access key. Consumers reference this key but name the
+      # env var S3_ACCESS_KEY -- one source of truth, and nothing outside minio.yaml mentions MinIO
+      # by name, so pointing the platform at real S3 is a value change.
+      - MINIO_ROOT_USER=payments
     envs:
       - secrets.env
