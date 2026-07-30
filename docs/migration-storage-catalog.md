@@ -78,7 +78,26 @@ genuinely differ between Compose and Kubernetes, and HDFS accounted for a third 
 
 ## What broke on the way
 
-_Filled in during the migration. Empty means it has not happened yet — not that it went perfectly._
+**Phase 1 — the Spark image's user has no home directory.** `spark-submit --packages` resolves
+through Ivy, which writes a cache under `$HOME`. The image sets `HOME=/nonexistent`, so the first
+run died with `FileNotFoundException: /nonexistent/.ivy2/cache/...`. The repo had already solved
+this for its own Spark Jobs — `spark.jars.ivy=/tmp/.ivy2` plus an explicit `HOME` in
+`k8s/base/spark.yaml` — which is an argument for reading the existing manifests before writing a
+new one.
+
+**Phase 1 — `io-impl` does not cover the catalog.** Iceberg's `S3FileIO` handles data and metadata
+*files*, but the `hadoop` catalog type resolves its own warehouse directory through the Hadoop
+FileSystem API, which `S3FileIO` never sees. Configuring `io-impl` and an `s3://` warehouse
+produced `UnsupportedFileSystemException: No FileSystem for scheme "s3"` — the catalog was asking
+Hadoop for a filesystem that had not been registered.
+
+The fix for the smoke test was `s3a://` with `hadoop-aws:3.3.4`, pinned to match the
+`hadoop-client-api` version in `spark:3.5.8-python3` (a mismatch there produces much worse errors).
+The interesting part is that this constraint disappears in Phase 2: a REST catalog does not live on
+a filesystem, so nothing needs to resolve the warehouse path through Hadoop, and `S3FileIO` becomes
+sufficient on its own. **The filesystem-catalog-on-object-storage combination that failed here is a
+known anti-pattern anyway** — it cannot do atomic commits — so hitting the wall was a signal the
+target architecture is the right one, not a detour around it.
 
 ## Verification
 
