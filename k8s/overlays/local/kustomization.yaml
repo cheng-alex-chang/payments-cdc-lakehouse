@@ -11,14 +11,6 @@ labels:
   - pairs:
       app.kubernetes.io/managed-by: kustomize
 
-configMapGenerator:
-  - name: local-runtime-notes
-    namespace: data-pipeline
-    literals:
-      - runtime=kind
-      - warehouse=hdfs://namenode:9000/warehouse
-      - kafkaBootstrap=kafka:29092
-
 # Passwords come from secrets.env (gitignored; copy secrets.env.example and edit).
 # Only non-secret identifiers stay as committed literals -- no credentials in git,
 # matching the Compose .env / .env.example pattern.

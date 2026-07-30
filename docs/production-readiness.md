@@ -7,7 +7,8 @@ each is stated precisely enough that you can check it against the code right now
 
 ## Security
 
-- **Containers run as root.** Only `hdfs.yaml` sets a `securityContext`; nothing declares
+- **Containers run as root.** No manifest sets a `securityContext` at all — the one that did was
+  `hdfs.yaml`, deleted in the storage migration; nothing declares
   `runAsNonRoot`, `readOnlyRootFilesystem`, or drops capabilities, so the namespace would fail the
   Pod Security Standards *restricted* profile. Fixing it properly means finding the right UID for
   each upstream image and testing every volume mount against it — worth doing on a cluster you can
@@ -34,9 +35,11 @@ each is stated precisely enough that you can check it against the code right now
   `CREATE TABLE IF NOT EXISTS` will not add a column Debezium starts emitting. Production would
   enforce an explicit contract where data enters, and fail loudly instead of writing nulls.
 
-- **No backup or restore path.** Postgres, the metastore database, and HDFS all sit on
-  `volumeClaimTemplates` with no snapshot schedule and no tested restore. For a local cluster the
-  recovery procedure is `k8s_down.sh` and rebuild; that is not a recovery procedure.
+- **No backup or restore path.** Postgres, the catalog database, and Kafka sit on
+  `volumeClaimTemplates`, and MinIO on a PVC, with no snapshot schedule and no tested restore. The
+  catalog database is the one that stings: losing it loses every table's metadata pointer while the
+  data files sit intact in object storage. For a local cluster the recovery procedure is
+  `k8s_down.sh` and rebuild; that is not a recovery procedure.
 
 ## Not on this list
 

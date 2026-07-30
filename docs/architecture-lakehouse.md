@@ -113,35 +113,56 @@ Streaming checkpoints are plain object-storage paths rather than Iceberg tables.
 | **`datanode`** | StatefulSet | **delete** |
 | **`hive-metastore`** | Deployment | **delete** |
 
-**15 workloads after.** PVC count stays at 6: HDFS's two go, MinIO's one arrives, and the rest are
-unchanged.
+**15 workloads after.** PVCs go from 6 to 5: HDFS's two go, MinIO's one arrives, and the Spark
+checkpoint claim is deleted once checkpoints move to their own bucket.
 
 ## Phase 4 deletion checklist
 
 Derived from the table above rather than from grepping and hoping.
 
 **Manifests and config to remove**
-- [ ] `k8s/base/hdfs.yaml`, `k8s/base/hive-metastore.yaml`
-- [ ] `k8s/base/overrides/hdfs-site.xml` — leaves `overrides/` with two files
-- [ ] `config/hadoop/` (`core-site.xml`, `hdfs-site.xml`)
-- [ ] `config/hive-metastore/` and its image build
-- [ ] `config/trino/catalog/hive.properties`
-- [ ] `drivers/postgresql-*.jar` — only the metastore needed it
-- [ ] `scripts/init_hdfs.py` and its tests
-- [ ] Compose services `namenode`, `datanode`, `hive-metastore`; volumes `namenode_data`, `datanode_data`
-- [ ] `hadoop-config` ConfigMap generator, and the Spark pods' mounts of it
+- [x] `k8s/base/hdfs.yaml`, `k8s/base/hive-metastore.yaml`
+- [x] `k8s/base/overrides/hdfs-site.xml` — leaves `overrides/` with two files
+- [x] `config/hadoop/` (`core-site.xml`, `hdfs-site.xml`)
+- [x] `config/hive-metastore/` and its image build
+- [x] `config/trino/catalog/hive.properties`
+- [x] `drivers/postgresql-*.jar` — only the metastore needed it
+- [x] `scripts/init_hdfs.py` and its tests
+- [x] Compose services `namenode`, `datanode`, `hive-metastore`; volumes `namenode_data`, `datanode_data`
+- [x] `hadoop-config` ConfigMap generator, and the Spark pods' mounts of it
 
 **Renames**
-- [ ] `metastore-db` → `catalog-db`; `METASTORE_*` secret keys → `CATALOG_*`
+- [x] `metastore-db` → `catalog-db`; `METASTORE_*` secret keys → `CATALOG_*`
 
 **Guards that must be updated in the same change**
-- [ ] `scripts/k8s_verify.sh` arrays — the drift test fails otherwise
-- [ ] `scripts/validate_k8s_manifests.py` `REQUIRED_OBJECTS`
-- [ ] `tests/test_validate_k8s_manifests.py` — HDFS headless-Service assertions
-- [ ] `tests/test_pipeline_runtime.py` — the `init_hdfs` unit tests
+- [x] `scripts/k8s_verify.sh` arrays — the drift test fails otherwise
+- [x] `scripts/validate_k8s_manifests.py` `REQUIRED_OBJECTS`
+- [x] `tests/test_validate_k8s_manifests.py` — HDFS headless-Service assertions
+- [x] `tests/test_pipeline_runtime.py` — the `init_hdfs` unit tests
 
-**Docs** — `README.md` (16 mentions), `docs/kubernetes.md` (26), `docs/design.md` (11),
-`docs/index.html` (2), and `docs/images/architecture-overview.svg` must be redrawn.
+**Docs** — [x] `README.md`, `docs/kubernetes.md`, `docs/design.md`, `docs/index.html`, and
+`docs/images/architecture-overview.svg` redrawn.
+
+### What the checklist did not catch
+
+Two items were ticked on a half-finished edit, and both survived to the end of Phase 5:
+
+**The Compose services were deleted; `trino`'s `depends_on: hive-metastore` was not.** Compose
+rejects a project whose `depends_on` names an undefined service, so `docker compose config` exited
+1 and `docker compose up` could not start *anything*. The whole migration was verified on
+Kubernetes, so nothing exercised the other runtime. Worse, the replacement was never added either
+— Compose had no `iceberg-rest` service at all, while the README claimed the two runtimes resolved
+the same service names.
+
+**The `spark-checkpoints` volume outlived its reason.** It was introduced when file IO briefly went
+through `HadoopFileIO` and checkpoints could not live on S3. Once `S3FileIO` came back and
+`checkpoint_path()` returned `s3a://checkpoints/…`, the claim stayed mounted at `/checkpoints` in
+all three Spark pods and was never written again — confirmed by mounting it after a full green run
+and finding an empty directory, while MinIO held the real bronze and silver offset logs.
+
+Both are the same failure as every other drift in this project: a reference with nothing asserting
+it still pointed at something real. The guards in `tests/test_compose_manifest.py` now assert both —
+every `depends_on` names a defined service, and every declared volume is mounted by some workload.
 
 ## Known constraint, carried forward
 

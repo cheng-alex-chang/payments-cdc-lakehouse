@@ -101,11 +101,11 @@ See [kubernetes.md](kubernetes.md) for commands, current verification steps, and
 
 ## Orchestration
 
-The Airflow DAG `payments_pipeline` runs the seven tasks in sequence:
+The Airflow DAG `payments_pipeline` runs the ten tasks in sequence:
 
 ```
-init_object_store → init_catalog → validate_connector → bronze_load → silver_transform
-  → gold_transform → publish_trino_tables → validate_trino
+init_object_store → init_catalog → validate_connector → validate_schema → bronze_load
+  → silver_transform → gold_transform → publish_trino_tables → validate_trino → maintain_iceberg
 ```
 
 The DAG has no schedule (`schedule=None`) and is triggered manually or via the Airflow API. `max_active_runs=1` prevents concurrent runs from conflicting on the shared Iceberg tables.

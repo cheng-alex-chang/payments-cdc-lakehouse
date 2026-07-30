@@ -286,12 +286,12 @@ The main DAG is `airflow/dags/payments_pipeline.py`, and it orchestrates **both*
 
 1. `init_object_store` — creates the warehouse and checkpoint buckets over the **S3 API**
 2. `init_catalog` — bootstraps the Iceberg REST catalog and registers the warehouse
-2. `validate_connector` — Debezium connector and task are `RUNNING`
-3. `validate_schema` — source schema matches what the pipeline expects
-4. `bronze_load` · `silver_transform` · `gold_transform` — the Spark medallion
-5. `publish_trino_tables` — the Iceberg tables are visible to Trino (and **fails** if one is missing)
-6. `validate_trino` — bronze = silver = gold reconciliation
-7. `maintain_iceberg` — compaction, snapshot expiry, orphan cleanup
+3. `validate_connector` — Debezium connector and task are `RUNNING`
+4. `validate_schema` — source schema matches what the pipeline expects
+5. `bronze_load` · `silver_transform` · `gold_transform` — the Spark medallion
+6. `publish_trino_tables` — the Iceberg tables are visible to Trino (and **fails** if one is missing)
+7. `validate_trino` — bronze = silver = gold reconciliation
+8. `maintain_iceberg` — compaction, snapshot expiry, orphan cleanup
 
 Every task except the three Spark ones is **runtime-neutral**: it speaks HTTP to a service name
 (`trino:8080`, `minio:9000`, `iceberg-rest:8181`) that resolves as a Compose service name and a Kubernetes Service
@@ -435,7 +435,7 @@ This project is easiest to understand when viewed from three angles:
 
 Airflow shows the pipeline running from source validation through bronze, silver, gold, and downstream validation.
 
-![Airflow graph view of a successful payments_pipeline run on Kubernetes — nine tasks green, with bronze_load, silver_transform and gold_transform running as KubernetesPodOperator and the rest as BashOperator](docs/images/airflow-payments-pipeline.png)
+![Airflow graph view of a successful payments_pipeline run on Kubernetes — ten tasks green, with bronze_load, silver_transform and gold_transform running as KubernetesPodOperator and the rest as BashOperator](docs/images/airflow-payments-pipeline.png)
 
 Grafana shows the seeded demo data as business-facing metrics, including volume, authorization rate, refunds, and payment method mix.
 

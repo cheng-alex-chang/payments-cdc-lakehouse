@@ -214,7 +214,7 @@ curl 'http://localhost:8000/v1/metrics/summary'
     <div class="shots">
       <div class="card">
         <a class="zoom" href="images/airflow-payments-pipeline.png" target="_blank" rel="noopener" aria-label="Open full-size image">
-          <img src="images/airflow-payments-pipeline.png" alt="Airflow graph view of a successful payments_pipeline run on Kubernetes — nine tasks green, with bronze_load, silver_transform and gold_transform running as KubernetesPodOperator and the rest as BashOperator">
+          <img src="images/airflow-payments-pipeline.png" alt="Airflow graph view of a successful payments_pipeline run on Kubernetes — ten tasks green, with bronze_load, silver_transform and gold_transform running as KubernetesPodOperator and the rest as BashOperator">
         </a>
         <p class="caption"><strong>Airflow</strong> — a full run on the cluster. The three Spark tasks are <code>KubernetesPodOperator</code> pods; every other task talks HTTP to a service name that resolves under Compose and Kubernetes alike.</p>
       </div>

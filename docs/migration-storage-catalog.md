@@ -34,14 +34,22 @@ StatefulSet in `k8s/base`.
 | Workloads (Deployments + StatefulSets) | 16 | **15** | −1 |
 | Memory requests | 6,304 Mi (6.16 GiB) | **4,704 Mi (4.59 GiB)** | **−1,600 Mi** |
 | Memory limits | 12,096 Mi (11.81 GiB) | **9,024 Mi (8.81 GiB)** | **−3,072 Mi** |
-| PersistentVolumeClaims | 6 | 6 | none |
+| PersistentVolumeClaims | 6 | **5** | −1 |
 | Pods running | 18 | 18 | none |
 | Resident memory, kind node | 6.12 GiB | 7.22 GiB | +1.1 GiB |
 
-Two numbers deserve honesty rather than spin.
+**The PVC number was wrong until after the migration was declared finished.** This page previously
+said six before and six after, because Spark's streaming checkpoints had been given a claim of
+their own while file IO briefly went through `HadoopFileIO`. When `S3FileIO` came back, checkpoints
+moved to `s3a://checkpoints/` and the claim stopped being written — but stayed mounted in all three
+Spark pods. Mounting it after a full green run showed an empty directory while MinIO held the real
+bronze and silver offset logs, so it was deleted. HDFS's two claims go, MinIO adds one, and the
+checkpoint claim goes with them: six to five.
 
-**PVC count did not improve.** HDFS's two go, MinIO adds one, and Spark's streaming checkpoints
-were briefly given one of their own before that approach was abandoned. Six before, six after.
+Removing it takes a scheduling constraint with it. The claim was `ReadWriteOnce`, and all three
+Spark pods mounted it, so all three had to land on the same node. On a single-node kind cluster
+that is invisible; on a real cluster it is the difference between three pods that can be scheduled
+anywhere and three that cannot.
 
 **Resident memory went up, not down.** 6.12 GiB to 7.22 GiB, measured on a cluster that had just
 finished a pipeline run rather than one sitting idle, so the two figures are not like-for-like. The
@@ -75,10 +83,10 @@ for the first time.
 **`metastore-db` is not removed.** It is reused as the catalog's database and renamed `catalog-db`;
 the Postgres instance survives, only its tenant changes.
 
-**PVC count does not improve: 6 before, 6 after.** Two go with HDFS, MinIO adds one, and Spark's
-streaming checkpoints need one of their own once they can no longer live in a catalog-governed
-bucket. Stating it plainly because the earlier draft of this page claimed a reduction that the
-arithmetic does not support.
+**PVC count: 6 before, 5 after.** Two go with HDFS and MinIO adds one, which is a wash; the
+reduction comes from deleting the checkpoint claim that a since-abandoned design had introduced.
+Worth stating carefully, because an earlier draft of this page claimed a reduction the arithmetic
+did not support, and the correction below only arrived after the migration was verified.
 
 ## What was deleted
 
@@ -92,6 +100,9 @@ Beyond the three workloads, the migration removed a surprising amount of inciden
 - The committed PostgreSQL JDBC driver, present only so the metastore could reach its database
 - `config/trino/catalog/hive.properties`
 - The `hdfs-init` Job and `scripts/init_hdfs.py`
+- `k8s/base/spark-checkpoints.yaml` and the matching Compose volume — a 2 Gi claim mounted by all
+  three Spark pods, left over from an intermediate design and never written again once checkpoints
+  moved to their own bucket
 
 The `overrides/` deletion is worth noting on its own: that directory exists to hold files that must
 genuinely differ between Compose and Kubernetes, and HDFS accounted for a third of it.
@@ -192,6 +203,48 @@ warehouse *creation* body and stores `true` anyway; the same field on
 `POST /warehouse/{id}/storage` is honoured. `scripts/init_iceberg_catalog.py` now applies the
 storage profile as an explicit second step rather than trusting the create call.
 
+**After Phase 5 — the runtime nobody re-ran.** Every phase above was verified on Kubernetes, and
+Kubernetes was green. Docker Compose was not: deleting the `hive-metastore` service in Phase 4 left
+`trino` depending on it, and Compose refuses to load a project whose `depends_on` names an undefined
+service. `docker compose config` exited 1, which means `docker compose up` started *nothing* — not
+a degraded quickstart, an absent one. The replacement was missing too: there was no `iceberg-rest`
+service at all, no storage credentials on any Airflow service, and no `CATALOG_ENCRYPTION_KEY` in
+`.env.example`, while the README claimed a task could address `iceberg-rest:8181` in either runtime.
+
+The migration was declared complete on the strength of a green cluster, and a green cluster only
+proves the cluster. `tests/test_compose_manifest.py` now asserts the parts that had nothing watching
+them: every `depends_on` names a defined service, every declared volume is mounted, every `${VAR}`
+appears in `.env.example`, and every Kubernetes workload has a Compose service of the same name.
+
+**The documented trigger command did nothing on a fresh cluster.** Airflow pauses new DAGs by
+default, and a paused DAG *accepts* `airflow dags trigger` — it records the run, returns success,
+and never schedules it. The run sits in `queued` with nothing logged as an error anywhere. Every
+earlier verification had unpaused the DAG by hand in the web UI, during a screenshot session, and
+nothing in the repo recorded that step; so the README's own trigger command, run against a cluster
+built from scratch, produced a run that queued for thirty minutes. The DAG now sets
+`is_paused_upon_creation=False`, which is safe precisely because `schedule=None` means nothing runs
+until something triggers it.
+
+This one is worth dwelling on: it is the only failure here that produced *no error at all*. A
+dangling `depends_on` exits 1 and a missing ConfigMap wedges a pod, but a paused DAG looks exactly
+like a slow one.
+
+**Trino had no storage credentials on Compose, and only running it could show that.** Everything
+above was found by reading. This one was not. `config/trino/catalog/iceberg.properties` carries the
+endpoint, region, and path-style flag but deliberately no secrets — Trino's native S3 client reads
+`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` from its environment, which `k8s/base/trino.yaml`
+supplies and the Compose service did not. The failure was well disguised: Spark wrote bronze,
+silver, and gold without complaint, `publish_trino_tables` passed, and then every read failed with
+
+    io.trino.spi.TrinoException: Error processing metadata for table analytics.payments_bronze
+
+which reads like catalog corruption rather than a missing key. The guard derives its expectation
+from the manifests instead of restating it: whichever workloads Kubernetes gives `AWS_*`, the
+Compose services of the same name must have them too.
+
+Both runtimes are now verified end to end — the same 50,004 reconciled through Trino on a
+from-scratch Kubernetes cluster and on a from-scratch Compose stack.
+
 **Operational note worth knowing.** Trino resolves the warehouse prefix from `/v1/config` once, at
 catalog initialisation. Deleting and recreating a warehouse under a running Trino leaves it holding
 a stale UUID, and every query fails with `Schema 'analytics' does not exist`. Engines must be
@@ -206,6 +259,8 @@ The migration is considered complete only when the same checks that passed on HD
 - `bronze = silver = gold = 50,004` reconciled through Trino across 8,764 hourly buckets
 - The gold API answering with the same 50,004 and its snapshot-keyed cache registering hits
 - `pytest` green with no cluster running
+- **The same run on Docker Compose**, from `docker compose up` through the identical reconciliation.
+  Added after a green Kubernetes cluster turned out to prove only the cluster.
 
 Reconciliation at the identical row count is the point. The data is rebuilt from source rather than
 migrated, so matching the pre-migration number is what proves the rebuild was faithful.
