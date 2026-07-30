@@ -35,8 +35,12 @@ StatefulSet in `k8s/base`.
 | Memory requests | 6,304 Mi (6.16 GiB) | _tbd_ | |
 | Memory limits | 12,096 Mi (11.81 GiB) | _tbd_ | |
 | PersistentVolumeClaims | 6 | _tbd_ | |
-| Container count on the kind node | _tbd_ | _tbd_ | |
-| Wall clock, `k8s_up.sh` to all-ready | _tbd_ | _tbd_ | |
+| Pods running | 18 | _tbd_ | |
+| Resident memory, kind node | 6.12 GiB / 11.67 GiB (52%) | _tbd_ | |
+| Wall clock, `k8s_up.sh` to all-ready | 5m 14s | _tbd_ | |
+
+Live figures come from a clean `k8s_up.sh` on the last HDFS build, measured with
+`docker stats --no-stream` on the kind node once `k8s_verify.sh` reported all 16 workloads ready.
 
 ### The number that matters
 
