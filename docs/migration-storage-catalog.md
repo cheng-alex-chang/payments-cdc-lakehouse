@@ -48,21 +48,31 @@ Declared memory limits totalled **11.81 GiB against a 12 GB Docker allocation**.
 within 200 MiB of its ceiling, which is why bringing it up required raising Docker's memory in the
 first place, and why a single mis-sized JVM heap took the whole cluster down rather than one pod.
 
-The four workloads removed here account for **2,240 Mi of requests and 4,480 Mi of limits**:
+Three workloads go, two arrive. Both halves belong in the arithmetic:
 
-| Workload | Kind | Requests | Limits |
+| | Workload | Requests | Limits |
 |---|---|---:|---:|
-| `namenode` | StatefulSet | 768 Mi | 1,536 Mi |
-| `datanode` | StatefulSet | 768 Mi | 1,536 Mi |
-| `hive-metastore` | Deployment | 512 Mi | 1,024 Mi |
-| `metastore-db` | StatefulSet | 192 Mi | 384 Mi |
+| removed | `namenode` | 768 Mi | 1,536 Mi |
+| removed | `datanode` | 768 Mi | 1,536 Mi |
+| removed | `hive-metastore` | 512 Mi | 1,024 Mi |
+| added | `minio` | 256 Mi | 512 Mi |
+| added | `iceberg-rest` | 192 Mi | 512 Mi |
+| | **net** | **−1,600 Mi** | **−3,072 Mi** |
 
-Three of the six PVCs go with them. What replaces all of it is MinIO plus a REST catalog — two
-workloads, one PVC.
+That takes declared limits from 11.81 GiB to roughly **8.8 GiB** — off the ceiling, with headroom
+for the first time.
+
+**`metastore-db` is not removed.** It is reused as the catalog's database and renamed `catalog-db`;
+the Postgres instance survives, only its tenant changes.
+
+**PVC count does not improve: 6 before, 6 after.** Two go with HDFS, MinIO adds one, and Spark's
+streaming checkpoints need one of their own once they can no longer live in a catalog-governed
+bucket. Stating it plainly because the earlier draft of this page claimed a reduction that the
+arithmetic does not support.
 
 ## What was deleted
 
-Beyond the four workloads, the migration removed a surprising amount of incidental weight:
+Beyond the three workloads, the migration removed a surprising amount of incidental weight:
 
 - `config/hadoop/` — `core-site.xml` and `hdfs-site.xml`
 - `k8s/base/overrides/hdfs-site.xml` — one of only three files that had to differ on Kubernetes,
@@ -109,11 +119,24 @@ permission to view it at location `s3://checkpoints/silver/sources/0/offsets/0`
 in warehouse `03039098-...`
 ```
 
-Silver reads bronze as an Iceberg stream. Iceberg's micro-batch source writes its offset log
-through the **table's** FileIO, and under a REST catalog that FileIO is scoped to the warehouse —
-so it asks the catalog to authorise a path that belongs to no table, and the catalog correctly
-refuses. Disabling `s3.remote-signing-enabled` did not change it, which rules out request signing
-as the mechanism.
+Silver reads bronze as an Iceberg stream, and Iceberg's micro-batch source writes its offset log
+through the **table's** FileIO. Asking the catalog what config that FileIO gets shows exactly why
+that fails — `loadTable` returns, per table:
+
+```
+"s3.remote-signing-enabled": "true"
+"s3.signer.endpoint": ".../tabular-id/019fb10d-.../v1/aws/s3/sign"
+"storage-credentials": [{"prefix": "s3://warehouse/iceberg/019fb10d-..."}]
+```
+
+Every S3 request from that FileIO is signed at an endpoint **bound to one table id**, and the
+vended credential is scoped to that table's prefix. The checkpoint file goes through the same
+FileIO, gets signed at the table-scoped endpoint, and the catalog correctly refuses a location that
+is not that table.
+
+Setting `s3.remote-signing-enabled=false` on the client had no effect, and the reason is worth
+knowing: in the Iceberg REST spec the **server's** config wins over the client's. You cannot opt
+out of signing from the engine side.
 
 This never arose on HDFS because the checkpoint filesystem and the table filesystem were the same
 unscoped `hdfs://`. It is a real consequence of a catalog that governs storage access, not a
