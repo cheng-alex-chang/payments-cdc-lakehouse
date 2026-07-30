@@ -782,6 +782,10 @@ def test_payments_pipeline_dag_has_expected_shape(monkeypatch: pytest.MonkeyPatc
         def __init__(self, *args, **kwargs) -> None:
             self.schedule_interval = kwargs.get("schedule")
             self.max_active_runs = kwargs.get("max_active_runs")
+            # Airflow leaves this None and falls back to `dags_are_paused_at_creation`, which
+            # defaults to True. Defaulting to True here reproduces the effective behaviour, so
+            # dropping the kwarg from the DAG fails the assertion rather than silently passing.
+            self.is_paused_upon_creation = kwargs.get("is_paused_upon_creation", True)
             self.tasks: dict[str, "FakeBashOperator"] = {}
 
         def __enter__(self) -> "FakeDAG":
@@ -831,6 +835,12 @@ def test_payments_pipeline_dag_has_expected_shape(monkeypatch: pytest.MonkeyPatc
 
     assert dag.schedule_interval is None
     assert dag.max_active_runs == 1
+    # A paused DAG accepts `airflow dags trigger` and then never runs it -- the run sits in
+    # `queued` with nothing logged as an error. The README documents that trigger command, so on a
+    # cluster built from scratch it has to actually work. Unpausing is only safe because the DAG
+    # has no schedule; if a schedule is ever added, this pairing needs rethinking, and this
+    # assertion is where that conversation starts.
+    assert dag.is_paused_upon_creation is False
     assert dag.task_ids == {
         "init_object_store", "init_catalog", "validate_connector", "validate_schema", "bronze_load",
         "silver_transform", "gold_transform", "publish_trino_tables", "validate_trino",

@@ -28,6 +28,12 @@ with DAG(
     start_date=datetime(2024, 1, 1),
     catchup=False,
     max_active_runs=1,
+    # Airflow pauses new DAGs by default, and a paused DAG accepts `airflow dags trigger` while
+    # never running it -- the run sits in `queued` with no error logged anywhere. That made the
+    # trigger command in the README silently do nothing on a cluster built from scratch, because
+    # every earlier verification had unpaused this DAG by hand in the UI and nothing recorded the
+    # step. Safe to unpause only because `schedule=None`: nothing runs until someone triggers it.
+    is_paused_upon_creation=False,
     tags=["payments", "spark", "cdc"],
 ) as dag:
     # Storage and catalog bootstrap, replacing init_hdfs. Both are idempotent, so a retry costs
