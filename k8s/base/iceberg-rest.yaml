@@ -4,14 +4,12 @@
 # its own, no fine-grained access control, no credential vending. A REST catalog replaces all of it
 # with an HTTP contract any engine can speak without a Thrift client.
 #
-# It also removes a constraint discovered in Phase 1: a filesystem-backed catalog has to resolve its
-# warehouse directory through the Hadoop FileSystem API, which forces s3a:// and hadoop-aws. A REST
-# catalog does not live on a filesystem, so Iceberg's own S3FileIO is sufficient and the Hadoop S3
-# connector drops out entirely. See docs/migration-storage-catalog.md.
+# The catalog's state lives in catalog-db -- the Postgres instance that used to back Hive Metastore,
+# reused rather than replaced. With Hive gone, that instance's primary database *is* the catalog
+# database, so nothing has to create a second one.
 #
-# The catalog database is a second database on the existing Postgres instance rather than a new
-# server. That instance is renamed metastore-db -> catalog-db in Phase 4, once Hive Metastore is
-# gone and the old name has stopped being true.
+# Engines authenticate to object storage themselves; the catalog does not sign their S3 requests.
+# See the Phase 3 section of docs/migration-storage-catalog.md for why that is not optional.
 apiVersion: v1
 kind: Service
 metadata:
@@ -48,38 +46,6 @@ spec:
         app.kubernetes.io/component: catalog
     spec:
       initContainers:
-        # The catalog database has to exist before migrate runs. CREATE DATABASE has no
-        # IF NOT EXISTS, so this checks first and is safe to re-run.
-        - name: create-catalog-db
-          image: postgres:15
-          env:
-            - name: PGHOST
-              value: metastore-db
-            - name: PGUSER
-              valueFrom:
-                secretKeyRef: { name: platform-secrets, key: METASTORE_USER }
-            - name: PGPASSWORD
-              valueFrom:
-                secretKeyRef: { name: platform-secrets, key: METASTORE_PASSWORD }
-            - name: PGDATABASE
-              valueFrom:
-                secretKeyRef: { name: platform-secrets, key: METASTORE_DB }
-          command:
-            - /bin/sh
-            - -c
-            - |
-              set -e
-              i=0
-              until pg_isready -q; do
-                i=$((i+1)); [ "$i" -ge 60 ] && { echo "timed out waiting for postgres" >&2; exit 1; }
-                sleep 2
-              done
-              if [ "$(psql -tAc "SELECT 1 FROM pg_database WHERE datname='catalog'")" = "1" ]; then
-                echo "database catalog already exists"
-              else
-                psql -v ON_ERROR_STOP=1 -c "CREATE DATABASE catalog"
-                echo "database catalog created"
-              fi
         # Lakekeeper keeps its schema in Postgres and will not serve against an unmigrated
         # database. Running migrate as an init container means a restart re-checks rather than
         # requiring a separate Job that has to be ordered by hand.
@@ -91,10 +57,10 @@ spec:
           env:
             - name: LAKEKEEPER__PG_USER
               valueFrom:
-                secretKeyRef: { name: platform-secrets, key: METASTORE_USER }
+                secretKeyRef: { name: platform-secrets, key: CATALOG_USER }
             - name: LAKEKEEPER__PG_PASSWORD
               valueFrom:
-                secretKeyRef: { name: platform-secrets, key: METASTORE_PASSWORD }
+                secretKeyRef: { name: platform-secrets, key: CATALOG_PASSWORD }
             - name: LAKEKEEPER__PG_ENCRYPTION_KEY
               valueFrom:
                 secretKeyRef: { name: platform-secrets, key: CATALOG_ENCRYPTION_KEY }
@@ -118,10 +84,10 @@ spec:
           env:
             - name: LAKEKEEPER__PG_USER
               valueFrom:
-                secretKeyRef: { name: platform-secrets, key: METASTORE_USER }
+                secretKeyRef: { name: platform-secrets, key: CATALOG_USER }
             - name: LAKEKEEPER__PG_PASSWORD
               valueFrom:
-                secretKeyRef: { name: platform-secrets, key: METASTORE_PASSWORD }
+                secretKeyRef: { name: platform-secrets, key: CATALOG_PASSWORD }
             - name: LAKEKEEPER__PG_ENCRYPTION_KEY
               valueFrom:
                 secretKeyRef: { name: platform-secrets, key: CATALOG_ENCRYPTION_KEY }
@@ -153,8 +119,8 @@ metadata:
 data:
   # Non-secret connection shape. Credentials arrive separately from platform-secrets so nothing
   # sensitive is ever in a ConfigMap.
-  LAKEKEEPER__PG_HOST_R: metastore-db
-  LAKEKEEPER__PG_HOST_W: metastore-db
+  LAKEKEEPER__PG_HOST_R: catalog-db
+  LAKEKEEPER__PG_HOST_W: catalog-db
   LAKEKEEPER__PG_PORT: "5432"
   LAKEKEEPER__PG_DATABASE: catalog
   LAKEKEEPER__LISTEN_PORT: "8181"

@@ -98,7 +98,6 @@ def _kubernetes_operator(task_id: str, layer: str) -> Any:
         # filesystem both read the standard AWS_* variables.
         env_vars=[
             k8s.V1EnvVar(name="HOME", value="/tmp"),
-            k8s.V1EnvVar(name="HADOOP_CONF_DIR", value="/opt/spark/conf"),
             k8s.V1EnvVar(
                 name="AWS_ACCESS_KEY_ID",
                 value_from=k8s.V1EnvVarSource(
@@ -129,26 +128,10 @@ def _kubernetes_operator(task_id: str, layer: str) -> Any:
                 name="spark-jobs",
                 config_map=k8s.V1ConfigMapVolumeSource(name="spark-jobs"),
             ),
-            k8s.V1Volume(
-                name="hadoop-config",
-                config_map=k8s.V1ConfigMapVolumeSource(name="hadoop-config"),
-            ),
         ],
         volume_mounts=[
             k8s.V1VolumeMount(name="checkpoints", mount_path="/checkpoints"),
             k8s.V1VolumeMount(name="spark-jobs", mount_path=JOBS_DIR),
-            # subPath, not a directory mount: mounting the ConfigMap over /opt/spark/conf would
-            # replace the image's Spark configuration wholesale.
-            k8s.V1VolumeMount(
-                name="hadoop-config",
-                mount_path="/opt/spark/conf/core-site.xml",
-                sub_path="core-site.xml",
-            ),
-            k8s.V1VolumeMount(
-                name="hadoop-config",
-                mount_path="/opt/spark/conf/hdfs-site.xml",
-                sub_path="hdfs-site.xml",
-            ),
         ],
     )
 

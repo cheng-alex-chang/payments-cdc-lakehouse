@@ -347,106 +347,13 @@ def test_run_local_job_rejects_unknown_job() -> None:
         run_local_job.main("invalid")
 
 
-# ---------------------------------------------------------------------------
-# init_hdfs
-# ---------------------------------------------------------------------------
-
-def test_init_hdfs_creates_every_directory_the_pipeline_writes_to() -> None:
-    from scripts import init_hdfs
-
-    # Bronze and silver checkpoint into HDFS, and the Iceberg warehouse lives there; a missing
-    # directory surfaces much later as a Spark write failure.
-    assert set(init_hdfs.DIRECTORIES) == {
-        "/data/bronze", "/data/silver", "/data/gold",
-        "/warehouse", "/warehouse/analytics.db",
-        "/checkpoints/bronze", "/checkpoints/silver",
-    }
 
 
-def test_init_hdfs_targets_the_namenode_by_service_name() -> None:
-    from scripts import init_hdfs
-
-    # "namenode" resolves as a Compose service name and a Kubernetes Service DNS name alike --
-    # the point of moving off `docker exec dp-namenode`.
-    url = init_hdfs.mkdirs_url("/warehouse", env={})
-
-    assert url == "http://namenode:9870/webhdfs/v1/warehouse?op=MKDIRS&user.name=root"
 
 
-def test_init_hdfs_honours_environment_overrides() -> None:
-    from scripts import init_hdfs
-
-    url = init_hdfs.mkdirs_url(
-        "/data/bronze",
-        env={"HDFS_NAMENODE_HOST": "localhost", "HDFS_NAMENODE_HTTP_PORT": "19870"},
-    )
-
-    assert url.startswith("http://localhost:19870/webhdfs/v1/data/bronze?op=MKDIRS")
 
 
-def test_init_hdfs_rejects_a_non_numeric_port() -> None:
-    from scripts import init_hdfs
 
-    with pytest.raises(ValueError, match="HDFS_NAMENODE_HTTP_PORT"):
-        init_hdfs.mkdirs_url("/warehouse", env={"HDFS_NAMENODE_HTTP_PORT": "ninety-eight-seventy"})
-
-
-def test_init_hdfs_raises_on_a_webhdfs_remote_exception() -> None:
-    from scripts import init_hdfs
-
-    # WebHDFS reports failures in the body with HTTP 200, so a status check alone would pass over
-    # a directory that was never created.
-    payload = {
-        "RemoteException": {
-            "exception": "AccessControlException",
-            "message": "Permission denied: user=root",
-        }
-    }
-
-    with pytest.raises(RuntimeError, match="AccessControlException"):
-        init_hdfs.raise_for_webhdfs_error(payload, "/warehouse")
-
-
-def test_init_hdfs_raises_when_mkdirs_returns_false() -> None:
-    from scripts import init_hdfs
-
-    with pytest.raises(RuntimeError, match="returned false"):
-        init_hdfs.raise_for_webhdfs_error({"boolean": False}, "/warehouse")
-
-
-def test_init_hdfs_accepts_a_successful_mkdirs() -> None:
-    from scripts import init_hdfs
-
-    # MKDIRS is idempotent: an existing directory returns true, so retries are safe.
-    init_hdfs.raise_for_webhdfs_error({"boolean": True}, "/warehouse")
-
-
-def test_init_hdfs_puts_to_every_directory(monkeypatch: pytest.MonkeyPatch) -> None:
-    from scripts import init_hdfs
-
-    calls: list[str] = []
-
-    class FakeResponse:
-        def raise_for_status(self) -> None: return None
-        def json(self) -> dict: return {"boolean": True}
-
-    class FakeHttp:
-        def put(self, url: str, timeout: int) -> FakeResponse:
-            calls.append(url)
-            return FakeResponse()
-
-    monkeypatch.setattr(init_hdfs, "requests", FakeHttp())
-    init_hdfs.main()
-
-    assert len(calls) == len(init_hdfs.DIRECTORIES)
-    assert all("op=MKDIRS" in url for url in calls)
-
-
-def test_init_hdfs_does_not_shell_into_a_compose_container() -> None:
-    source = (Path(__file__).resolve().parents[1] / "scripts" / "init_hdfs.py").read_text()
-
-    assert "docker exec" not in source
-    assert "dp-namenode" not in source
 
 
 # ---------------------------------------------------------------------------

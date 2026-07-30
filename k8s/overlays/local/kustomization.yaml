@@ -28,8 +28,8 @@ secretGenerator:
     literals:
       - POSTGRES_DB=payments
       - POSTGRES_USER=dataeng
-      - METASTORE_DB=metastore
-      - METASTORE_USER=hive
+      - CATALOG_DB=catalog
+      - CATALOG_USER=catalog
       - AIRFLOW_DB=airflow
       - AIRFLOW_USER=airflow
       - AIRFLOW_ADMIN_USERNAME=admin

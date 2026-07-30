@@ -64,6 +64,12 @@ Gold reads nothing from bronze — lineage stays strictly linear.
 
 This is the part that changed, and the boundary that matters:
 
+The catalog is **Lakekeeper**, chosen for being Rust rather than a JVM — it reserves 192 Mi where
+Hive Metastore reserved 512 Mi, which matters on a single node. The choice is close to free to
+revisit: `iceberg.catalog.type=rest` plus a URI is the entire engine-side configuration, and it is
+byte-identical against Apache Polaris (Snowflake Open Catalog), Unity Catalog, Nessie, or Glue's
+REST endpoint. The spec is the portable part; the implementation is a deployment detail.
+
 - **Catalog (`iceberg-rest`)** owns table *metadata*: which tables exist, where their files live,
   what the current snapshot is. Engines reach it over HTTP at `iceberg-rest:8181/catalog`.
 - **Storage (`minio`)** holds the *files*: Parquet data and Iceberg metadata under

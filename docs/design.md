@@ -2,7 +2,7 @@
 
 ## Overview
 
-A local CDC data platform that ingests payment events from Postgres into a lakehouse using the Bronze / Silver / Gold medallion architecture. Changes are captured in real time via Debezium and processed incrementally with Apache Spark and Apache Iceberg.
+A local CDC data platform that ingests payment events from Postgres into a lakehouse using the Bronze / Silver / Gold medallion architecture. Changes are captured in real time via Debezium and processed incrementally with Apache Spark into Apache Iceberg tables on S3-compatible object storage, catalogued by an Iceberg REST catalog.
 
 ## Data Flow
 
@@ -20,7 +20,7 @@ Postgres (OLTP)
 
 ### Bronze
 - **Source:** Kafka topic `cdc.public.payments`
-- **Pattern:** Structured Streaming with `trigger(availableNow=True)` and HDFS checkpoint
+- **Pattern:** Structured Streaming with `trigger(availableNow=True)` and a checkpoint in the `s3://checkpoints` bucket
 - **Schema:** Raw Kafka envelope — `kafka_key`, `kafka_value` (Debezium JSON, PII hashed), `kafka_topic`, `kafka_partition`, `kafka_offset`, `kafka_timestamp`
 - **Partitioned by:** `days(kafka_timestamp)`
 - **PII:** `shopper_id` in both `before` and `after` sections is SHA-256 hashed before the Iceberg write so PII never lands in the lakehouse
@@ -64,8 +64,8 @@ Debezium sets `op=d` on delete events and populates `before` instead of `after`.
 ## Known Limitations
 
 - **Single Spark executor in both local runtimes.** Compose runs jobs on `local[*]` inside one Spark container. The Kubernetes overlay includes suspended Spark Job templates that also use `local[*]` inside the Spark image. A production-like Spark-on-Kubernetes driver/executor setup would require additional Spark submit configuration, image packaging, and executor service account tuning.
-- **Single-replica HDFS.** Replication factor 1 with one datanode. All long-running containers use `restart: unless-stopped` with healthchecks, so a crashed datanode comes back automatically and dependent services (Hive Metastore, Spark, Trino) wait on `condition: service_healthy` before talking to it — so transient container crashes self-recover. The residual gap is data durability: a lost datanode volume would still lose the blocks. Production would use replication factor 3+ across multiple datanodes, or managed object storage (S3, GCS, ADLS) where block loss is not possible.
-- **Kubernetes runs the pipeline end to end, including orchestration.** `scripts/k8s_up.sh` creates a local `kind` cluster and Kustomize renders the full platform shape: source Postgres, metastore database, HDFS, Hive Metastore, Trino, Kafka (KRaft)/Kafka Connect, connector registration, Spark jobs, Airflow, the gold serving API, and observability. The data path is runtime-proven — bronze = silver = gold = 50,004 reconciled through Trino. Airflow drives it natively: the three Spark tasks become `KubernetesPodOperator` pods when `PIPELINE_RUNTIME=kubernetes`, and every other task talks HTTP to a service name that resolves in both runtimes, so no task shells into a Compose container. The remaining hardening is Spark itself: jobs run as a single `local[2]` driver rather than a production-like driver/executor split, which is a scale limitation rather than a runtime gap.
+- **Single-node object storage.** MinIO runs one replica on one PVC, so a lost volume loses the warehouse. That is the same durability gap HDFS had at replication factor 1, and it is why this ran on HDFS first and then moved: the *fix* is now a configuration change rather than an architecture change, because Iceberg addresses S3 and the endpoint is a value. Pointing `S3_ENDPOINT` at managed S3, GCS, or ADLS makes block loss someone else's problem.
+- **Kubernetes runs the pipeline end to end, including orchestration.** `scripts/k8s_up.sh` creates a local `kind` cluster and Kustomize renders the full platform shape: source Postgres, the catalog database, MinIO, the Iceberg REST catalog, Trino, Kafka (KRaft)/Kafka Connect, connector registration, Spark jobs, Airflow, the gold serving API, and observability. The data path is runtime-proven — bronze = silver = gold = 50,004 reconciled through Trino. Airflow drives it natively: the three Spark tasks become `KubernetesPodOperator` pods when `PIPELINE_RUNTIME=kubernetes`, and every other task talks HTTP to a service name that resolves in both runtimes, so no task shells into a Compose container. The remaining hardening is Spark itself: jobs run as a single `local[2]` driver rather than a production-like driver/executor split, which is a scale limitation rather than a runtime gap.
 - **No schema evolution handling.** If the Postgres schema changes, Debezium will emit new fields but the silver `CREATE TABLE IF NOT EXISTS` will not add columns automatically. A schema migration step would be needed.
 - **Delete-then-recreate within one batch.** If `op=d` and a later `op=c` for the same `payment_id` land in the same micro-batch, the upsert MERGE runs first and the DELETE then removes the recreated row. Rare in practice since Postgres usually reuses deterministic keys, but would need ordered per-key resolution to handle correctly.
 - **Data quality scope.** Silver fails fast on invalid IDs, negative amounts, malformed country/currency codes, unsupported methods/statuses, and timestamps that move backward. A production platform would typically extend this with reconciliation against source totals and external alerting.
@@ -80,7 +80,7 @@ An optional local Kubernetes path is available for infrastructure-managed deploy
 ```
 kind (scripts/k8s_up.sh) -> Kustomize overlay -> data-pipeline namespace
                                              -> shared ConfigMaps and Secrets
-                                             -> stateful databases and HDFS
+                                             -> stateful databases and object storage
                                              -> CDC, query, orchestration, and observability workloads
 ```
 
@@ -104,7 +104,7 @@ See [kubernetes.md](kubernetes.md) for commands, current verification steps, and
 The Airflow DAG `payments_pipeline` runs the seven tasks in sequence:
 
 ```
-init_hdfs → validate_connector → bronze_load → silver_transform
+init_object_store → init_catalog → validate_connector → bronze_load → silver_transform
   → gold_transform → publish_trino_tables → validate_trino
 ```
 

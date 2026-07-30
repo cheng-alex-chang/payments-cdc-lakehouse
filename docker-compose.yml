@@ -103,102 +103,26 @@ services:
       timeout: 5s
       retries: 12
 
-  namenode:
-    image: apache/hadoop:3
-    container_name: dp-namenode
-    hostname: namenode
-    restart: unless-stopped
-    entrypoint: ["/bin/bash", "-lc"]
-    command:
-      - >
-        if [ ! -d /tmp/hadoop-root/dfs/name/current ]; then
-          hdfs namenode -format -force -nonInteractive;
-        fi;
-        hdfs namenode
-    user: "0:0"
-    environment:
-      ENSURE_NAMENODE_DIR: /tmp/hadoop-root/dfs/name
-    ports:
-      - "9870:9870"
-      - "9000:9000"
-    volumes:
-      - namenode_data:/tmp/hadoop-root/dfs/name
-      - ./config/hadoop/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml
-      - ./config/hadoop/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://namenode:9870/ >/dev/null"]
-      interval: 15s
-      timeout: 5s
-      retries: 10
-      start_period: 30s
 
-  datanode:
-    image: apache/hadoop:3
-    container_name: dp-datanode
-    hostname: datanode
-    restart: unless-stopped
-    depends_on:
-      namenode:
-        condition: service_healthy
-    command: ["hdfs", "datanode"]
-    user: "0:0"
-    environment:
-      SERVICE_PRECONDITION: namenode:9870
-    ports:
-      - "9864:9864"
-    volumes:
-      - datanode_data:/tmp/hadoop-root/dfs/data
-      - ./config/hadoop/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml
-      - ./config/hadoop/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://datanode:9864/ >/dev/null"]
-      interval: 15s
-      timeout: 5s
-      retries: 10
-      start_period: 30s
 
-  metastore-db:
+  catalog-db:
     image: postgres:15
-    container_name: dp-metastore-db
+    container_name: dp-catalog-db
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${METASTORE_DB}
-      POSTGRES_USER: ${METASTORE_USER}
-      POSTGRES_PASSWORD: ${METASTORE_PASSWORD}
+      POSTGRES_DB: ${CATALOG_DB}
+      POSTGRES_USER: ${CATALOG_USER}
+      POSTGRES_PASSWORD: ${CATALOG_PASSWORD}
     ports:
       - "5433:5432"
     volumes:
-      - metastore_db_data:/var/lib/postgresql/data
+      - catalog_db_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${METASTORE_USER} -d ${METASTORE_DB}"]
+      test: ["CMD-SHELL", "pg_isready -U ${CATALOG_USER} -d ${CATALOG_DB}"]
       interval: 10s
       timeout: 5s
       retries: 10
 
-  hive-metastore:
-    image: apache/hive:4.0.0
-    container_name: dp-hive-metastore
-    restart: unless-stopped
-    depends_on:
-      metastore-db:
-        condition: service_healthy
-      namenode:
-        condition: service_healthy
-    ports:
-      - "9083:9083"
-    environment:
-      SERVICE_NAME: metastore
-      DB_DRIVER: postgres
-      SERVICE_OPTS: >-
-        -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://metastore-db:5432/metastore
-        -Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver
-        -Djavax.jdo.option.ConnectionUserName=${METASTORE_USER}
-        -Djavax.jdo.option.ConnectionPassword=${METASTORE_PASSWORD}
-    volumes:
-      - ./config/hive-metastore/hive-site.xml:/opt/hive/conf/hive-site.xml
-      - ./config/hadoop/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml
-      - ./config/hadoop/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml
-      - ./drivers/postgresql-42.7.5.jar:/opt/hive/lib/postgresql-42.7.5.jar
 
   trino:
     image: trinodb/trino:477
@@ -235,8 +159,6 @@ services:
     volumes:
       - spark_checkpoints:/checkpoints
       - .:/opt/project
-      - ./config/hadoop/core-site.xml:/opt/spark/conf/core-site.xml
-      - ./config/hadoop/hdfs-site.xml:/opt/spark/conf/hdfs-site.xml
 
   api:
     build:
@@ -430,9 +352,7 @@ volumes:
   postgres_data:
   spark_checkpoints:
   minio_data:
-  namenode_data:
-  datanode_data:
-  metastore_db_data:
+  catalog_db_data:
   grafana_data:
   trino_data:
   kafka_data:

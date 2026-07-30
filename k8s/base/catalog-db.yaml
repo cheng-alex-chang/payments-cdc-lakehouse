@@ -1,14 +1,14 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: metastore-db
+  name: catalog-db
   namespace: data-pipeline
   labels:
-    app.kubernetes.io/name: metastore-db
+    app.kubernetes.io/name: catalog-db
     app.kubernetes.io/component: catalog-database
 spec:
   selector:
-    app.kubernetes.io/name: metastore-db
+    app.kubernetes.io/name: catalog-db
   ports:
     - name: postgres
       port: 5432
@@ -17,21 +17,21 @@ spec:
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: metastore-db
+  name: catalog-db
   namespace: data-pipeline
   labels:
-    app.kubernetes.io/name: metastore-db
+    app.kubernetes.io/name: catalog-db
     app.kubernetes.io/component: catalog-database
 spec:
-  serviceName: metastore-db
+  serviceName: catalog-db
   replicas: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: metastore-db
+      app.kubernetes.io/name: catalog-db
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: metastore-db
+        app.kubernetes.io/name: catalog-db
         app.kubernetes.io/component: catalog-database
     spec:
       containers:
@@ -51,17 +51,17 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: platform-secrets
-                  key: METASTORE_DB
+                  key: CATALOG_DB
             - name: POSTGRES_USER
               valueFrom:
                 secretKeyRef:
                   name: platform-secrets
-                  key: METASTORE_USER
+                  key: CATALOG_USER
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: platform-secrets
-                  key: METASTORE_PASSWORD
+                  key: CATALOG_PASSWORD
           readinessProbe:
             exec:
               command:
@@ -81,11 +81,11 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 20
           volumeMounts:
-            - name: metastore-db-data
+            - name: catalog-db-data
               mountPath: /var/lib/postgresql/data
   volumeClaimTemplates:
     - metadata:
-        name: metastore-db-data
+        name: catalog-db-data
       spec:
         accessModes:
           - ReadWriteOnce

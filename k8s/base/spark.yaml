@@ -104,8 +104,6 @@ spec:
               valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_USER } }
             - name: AWS_SECRET_ACCESS_KEY
               valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_PASSWORD } }
-            - name: HADOOP_CONF_DIR
-              value: /opt/spark/conf
           # An unbounded Spark driver is the classic way to take a Kubernetes node down: with no
           # requests the scheduler cannot reason about the pod at all, and with no limit the JVM
           # grows until the kernel picks a victim. The limit is roughly twice the driver heap to
@@ -121,12 +119,6 @@ spec:
               mountPath: /checkpoints
             - name: spark-jobs
               mountPath: /opt/project/config/spark/jobs
-            - name: hadoop-config
-              mountPath: /opt/spark/conf/core-site.xml
-              subPath: core-site.xml
-            - name: hadoop-config
-              mountPath: /opt/spark/conf/hdfs-site.xml
-              subPath: hdfs-site.xml
       volumes:
         - name: checkpoints
           persistentVolumeClaim:
@@ -134,9 +126,6 @@ spec:
         - name: spark-jobs
           configMap:
             name: spark-jobs
-        - name: hadoop-config
-          configMap:
-            name: hadoop-config
 ---
 apiVersion: batch/v1
 kind: Job
@@ -183,8 +172,6 @@ spec:
               valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_USER } }
             - name: AWS_SECRET_ACCESS_KEY
               valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_PASSWORD } }
-            - name: HADOOP_CONF_DIR
-              value: /opt/spark/conf
           # An unbounded Spark driver is the classic way to take a Kubernetes node down: with no
           # requests the scheduler cannot reason about the pod at all, and with no limit the JVM
           # grows until the kernel picks a victim. The limit is roughly twice the driver heap to
@@ -200,12 +187,6 @@ spec:
               mountPath: /checkpoints
             - name: spark-jobs
               mountPath: /opt/project/config/spark/jobs
-            - name: hadoop-config
-              mountPath: /opt/spark/conf/core-site.xml
-              subPath: core-site.xml
-            - name: hadoop-config
-              mountPath: /opt/spark/conf/hdfs-site.xml
-              subPath: hdfs-site.xml
       volumes:
         - name: checkpoints
           persistentVolumeClaim:
@@ -213,9 +194,6 @@ spec:
         - name: spark-jobs
           configMap:
             name: spark-jobs
-        - name: hadoop-config
-          configMap:
-            name: hadoop-config
 ---
 apiVersion: batch/v1
 kind: Job
@@ -262,8 +240,6 @@ spec:
               valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_USER } }
             - name: AWS_SECRET_ACCESS_KEY
               valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_PASSWORD } }
-            - name: HADOOP_CONF_DIR
-              value: /opt/spark/conf
           # An unbounded Spark driver is the classic way to take a Kubernetes node down: with no
           # requests the scheduler cannot reason about the pod at all, and with no limit the JVM
           # grows until the kernel picks a victim. The limit is roughly twice the driver heap to
@@ -279,12 +255,6 @@ spec:
               mountPath: /checkpoints
             - name: spark-jobs
               mountPath: /opt/project/config/spark/jobs
-            - name: hadoop-config
-              mountPath: /opt/spark/conf/core-site.xml
-              subPath: core-site.xml
-            - name: hadoop-config
-              mountPath: /opt/spark/conf/hdfs-site.xml
-              subPath: hdfs-site.xml
       volumes:
         - name: checkpoints
           persistentVolumeClaim:
@@ -292,6 +262,3 @@ spec:
         - name: spark-jobs
           configMap:
             name: spark-jobs
-        - name: hadoop-config
-          configMap:
-            name: hadoop-config
