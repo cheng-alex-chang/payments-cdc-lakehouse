@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 
+from common import configure_iceberg, checkpoint_path
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql.functions import (
     count,
@@ -23,7 +24,7 @@ from pyspark.sql.window import Window
 BRONZE_TABLE    = "iceberg.analytics.payments_bronze"
 SILVER_TABLE    = "iceberg.analytics.payments_silver"
 DLQ_TABLE       = "iceberg.analytics.payments_silver_dlq"
-CHECKPOINT_PATH = "hdfs://namenode:9000/checkpoints/silver"
+CHECKPOINT_PATH = checkpoint_path("silver")
 
 ALLOWED_PAYMENT_METHODS = (
     "apple_pay",
@@ -174,14 +175,9 @@ def _upsert_to_silver(batch_df: DataFrame, batch_id: int) -> None:
 def main() -> None:
     LOGGER.info("Starting silver transformation from %s", BRONZE_TABLE)
     spark = (
-        SparkSession.builder
-        .appName("silver-payments")
-        .config("spark.sql.extensions",
-                "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
-        .config("spark.sql.catalog.iceberg",          "org.apache.iceberg.spark.SparkCatalog")
-        .config("spark.sql.catalog.iceberg.type",     "hive")
-        .config("spark.sql.catalog.iceberg.uri",      "thrift://hive-metastore:9083")
-        .config("spark.sql.catalog.iceberg.warehouse","hdfs://namenode:9000/warehouse")
+        configure_iceberg(
+            SparkSession.builder.appName("silver-payments")
+        )
         .getOrCreate()
     )
 

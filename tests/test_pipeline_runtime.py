@@ -301,7 +301,11 @@ def load_module_with_fake_pyspark(monkeypatch: pytest.MonkeyPatch, module_name: 
 # run_local_job
 # ---------------------------------------------------------------------------
 
-_ICEBERG = "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1"
+_ICEBERG = (
+    "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1"
+    ",org.apache.iceberg:iceberg-aws-bundle:1.6.1"
+    ",org.apache.hadoop:hadoop-aws:3.3.4"
+)
 _KAFKA   = "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.8"
 
 @pytest.mark.parametrize(
@@ -343,106 +347,13 @@ def test_run_local_job_rejects_unknown_job() -> None:
         run_local_job.main("invalid")
 
 
-# ---------------------------------------------------------------------------
-# init_hdfs
-# ---------------------------------------------------------------------------
-
-def test_init_hdfs_creates_every_directory_the_pipeline_writes_to() -> None:
-    from scripts import init_hdfs
-
-    # Bronze and silver checkpoint into HDFS, and the Iceberg warehouse lives there; a missing
-    # directory surfaces much later as a Spark write failure.
-    assert set(init_hdfs.DIRECTORIES) == {
-        "/data/bronze", "/data/silver", "/data/gold",
-        "/warehouse", "/warehouse/analytics.db",
-        "/checkpoints/bronze", "/checkpoints/silver",
-    }
 
 
-def test_init_hdfs_targets_the_namenode_by_service_name() -> None:
-    from scripts import init_hdfs
-
-    # "namenode" resolves as a Compose service name and a Kubernetes Service DNS name alike --
-    # the point of moving off `docker exec dp-namenode`.
-    url = init_hdfs.mkdirs_url("/warehouse", env={})
-
-    assert url == "http://namenode:9870/webhdfs/v1/warehouse?op=MKDIRS&user.name=root"
 
 
-def test_init_hdfs_honours_environment_overrides() -> None:
-    from scripts import init_hdfs
-
-    url = init_hdfs.mkdirs_url(
-        "/data/bronze",
-        env={"HDFS_NAMENODE_HOST": "localhost", "HDFS_NAMENODE_HTTP_PORT": "19870"},
-    )
-
-    assert url.startswith("http://localhost:19870/webhdfs/v1/data/bronze?op=MKDIRS")
 
 
-def test_init_hdfs_rejects_a_non_numeric_port() -> None:
-    from scripts import init_hdfs
 
-    with pytest.raises(ValueError, match="HDFS_NAMENODE_HTTP_PORT"):
-        init_hdfs.mkdirs_url("/warehouse", env={"HDFS_NAMENODE_HTTP_PORT": "ninety-eight-seventy"})
-
-
-def test_init_hdfs_raises_on_a_webhdfs_remote_exception() -> None:
-    from scripts import init_hdfs
-
-    # WebHDFS reports failures in the body with HTTP 200, so a status check alone would pass over
-    # a directory that was never created.
-    payload = {
-        "RemoteException": {
-            "exception": "AccessControlException",
-            "message": "Permission denied: user=root",
-        }
-    }
-
-    with pytest.raises(RuntimeError, match="AccessControlException"):
-        init_hdfs.raise_for_webhdfs_error(payload, "/warehouse")
-
-
-def test_init_hdfs_raises_when_mkdirs_returns_false() -> None:
-    from scripts import init_hdfs
-
-    with pytest.raises(RuntimeError, match="returned false"):
-        init_hdfs.raise_for_webhdfs_error({"boolean": False}, "/warehouse")
-
-
-def test_init_hdfs_accepts_a_successful_mkdirs() -> None:
-    from scripts import init_hdfs
-
-    # MKDIRS is idempotent: an existing directory returns true, so retries are safe.
-    init_hdfs.raise_for_webhdfs_error({"boolean": True}, "/warehouse")
-
-
-def test_init_hdfs_puts_to_every_directory(monkeypatch: pytest.MonkeyPatch) -> None:
-    from scripts import init_hdfs
-
-    calls: list[str] = []
-
-    class FakeResponse:
-        def raise_for_status(self) -> None: return None
-        def json(self) -> dict: return {"boolean": True}
-
-    class FakeHttp:
-        def put(self, url: str, timeout: int) -> FakeResponse:
-            calls.append(url)
-            return FakeResponse()
-
-    monkeypatch.setattr(init_hdfs, "requests", FakeHttp())
-    init_hdfs.main()
-
-    assert len(calls) == len(init_hdfs.DIRECTORIES)
-    assert all("op=MKDIRS" in url for url in calls)
-
-
-def test_init_hdfs_does_not_shell_into_a_compose_container() -> None:
-    source = (Path(__file__).resolve().parents[1] / "scripts" / "init_hdfs.py").read_text()
-
-    assert "docker exec" not in source
-    assert "dp-namenode" not in source
 
 
 # ---------------------------------------------------------------------------
@@ -871,6 +782,10 @@ def test_payments_pipeline_dag_has_expected_shape(monkeypatch: pytest.MonkeyPatc
         def __init__(self, *args, **kwargs) -> None:
             self.schedule_interval = kwargs.get("schedule")
             self.max_active_runs = kwargs.get("max_active_runs")
+            # Airflow leaves this None and falls back to `dags_are_paused_at_creation`, which
+            # defaults to True. Defaulting to True here reproduces the effective behaviour, so
+            # dropping the kwarg from the DAG fails the assertion rather than silently passing.
+            self.is_paused_upon_creation = kwargs.get("is_paused_upon_creation", True)
             self.tasks: dict[str, "FakeBashOperator"] = {}
 
         def __enter__(self) -> "FakeDAG":
@@ -920,12 +835,19 @@ def test_payments_pipeline_dag_has_expected_shape(monkeypatch: pytest.MonkeyPatc
 
     assert dag.schedule_interval is None
     assert dag.max_active_runs == 1
+    # A paused DAG accepts `airflow dags trigger` and then never runs it -- the run sits in
+    # `queued` with nothing logged as an error. The README documents that trigger command, so on a
+    # cluster built from scratch it has to actually work. Unpausing is only safe because the DAG
+    # has no schedule; if a schedule is ever added, this pairing needs rethinking, and this
+    # assertion is where that conversation starts.
+    assert dag.is_paused_upon_creation is False
     assert dag.task_ids == {
-        "init_hdfs", "validate_connector", "validate_schema", "bronze_load",
+        "init_object_store", "init_catalog", "validate_connector", "validate_schema", "bronze_load",
         "silver_transform", "gold_transform", "publish_trino_tables", "validate_trino",
         "maintain_iceberg",
     }
-    assert dag.get_task("init_hdfs").downstream_task_ids == {"validate_connector"}
+    assert dag.get_task("init_object_store").downstream_task_ids == {"init_catalog"}
+    assert dag.get_task("init_catalog").downstream_task_ids == {"validate_connector"}
     assert dag.get_task("validate_connector").downstream_task_ids == {"validate_schema"}
     assert dag.get_task("validate_schema").downstream_task_ids == {"bronze_load"}
     assert dag.get_task("bronze_load").downstream_task_ids == {"silver_transform"}
@@ -1038,3 +960,20 @@ def test_payment_aggregate_panels_read_gold_via_trino() -> None:
         matches = [p for title, p in by_title.items() if title.startswith(prefix)]
         assert len(matches) == 1, prefix
         assert matches[0]["datasource"]["uid"] == "payments-postgres", prefix
+
+
+def test_streaming_checkpoints_are_addressable_by_s3fileio() -> None:
+    """Checkpoints must carry an s3 scheme, and it must not be a bare path.
+
+    Iceberg's micro-batch source writes its offset log through the *table's* FileIO, which is
+    S3FileIO -- and S3FileIO can only parse s3 URIs. A `file://` checkpoint fails with "Invalid S3
+    URI, cannot determine scheme", and a bare `/path` resolves against Spark's default filesystem
+    (HDFS, per core-site.xml) rather than object storage. Both fail only once a job is running.
+    """
+    from common import checkpoint_path
+
+    for layer in ("bronze", "silver"):
+        path = checkpoint_path(layer, env={})
+        assert path.startswith(("s3://", "s3a://")), (
+            f"{layer} checkpoint must be on object storage for S3FileIO to address it, got {path}"
+        )

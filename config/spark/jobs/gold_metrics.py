@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 
+from common import configure_iceberg
 from pyspark.sql import SparkSession
 
 
@@ -14,14 +15,9 @@ LOGGER = logging.getLogger(__name__)
 
 def _build_spark_session() -> SparkSession:
     return (
-        SparkSession.builder
-        .appName("gold-metrics")
-        .config("spark.sql.extensions",
-                "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
-        .config("spark.sql.catalog.iceberg",          "org.apache.iceberg.spark.SparkCatalog")
-        .config("spark.sql.catalog.iceberg.type",     "hive")
-        .config("spark.sql.catalog.iceberg.uri",      "thrift://hive-metastore:9083")
-        .config("spark.sql.catalog.iceberg.warehouse","hdfs://namenode:9000/warehouse")
+        configure_iceberg(
+            SparkSession.builder.appName("gold-metrics")
+        )
         .getOrCreate()
     )
 

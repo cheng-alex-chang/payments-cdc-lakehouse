@@ -19,8 +19,8 @@ NAMESPACE=data-pipeline
 # Cold starts pull images and wait on dependency probes; override for a slower machine.
 TIMEOUT="${VERIFY_TIMEOUT:-300s}"
 
-STATEFULSETS=(airflow-postgres datanode kafka metastore-db namenode postgres)
-DEPLOYMENTS=(airflow-scheduler airflow-webserver api grafana hive-metastore kafka-connect prometheus statsd-exporter trino trino-exporter)
+STATEFULSETS=(airflow-postgres catalog-db kafka postgres)
+DEPLOYMENTS=(airflow-scheduler airflow-webserver api grafana iceberg-rest kafka-connect minio prometheus statsd-exporter trino trino-exporter)
 
 for command in kubectl; do
   if ! command -v "${command}" >/dev/null 2>&1; then
@@ -32,7 +32,7 @@ done
 KUBECTL=(kubectl --kubeconfig "${KUBECONFIG_PATH}")
 
 "${KUBECTL[@]}" get namespace "${NAMESPACE}" >/dev/null
-"${KUBECTL[@]}" get configmap hadoop-config -n "${NAMESPACE}" >/dev/null
+"${KUBECTL[@]}" get configmap trino-catalog -n "${NAMESPACE}" >/dev/null
 "${KUBECTL[@]}" get secret platform-secrets -n "${NAMESPACE}" >/dev/null
 
 failed=()

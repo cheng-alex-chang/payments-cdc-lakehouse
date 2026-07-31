@@ -6,17 +6,17 @@ kind: Kustomization
 # root, which Kustomize blocks by default, so scripts/k8s_up.sh renders with
 # `kubectl kustomize --load-restrictor=LoadRestrictionsNone` before applying.
 #
-# The only exceptions are the three files under overrides/, which must genuinely differ on
-# Kubernetes (pod memory ceilings and bind-host settings). Each carries a header comment
-# explaining why; see docs/kubernetes.md. Nothing else belongs there.
+# The only exceptions are the two files under overrides/, which must genuinely differ on
+# Kubernetes (Trino's heap and query-memory ceilings, sized for a single packed node). Each
+# carries a header comment explaining why; see docs/kubernetes.md. Nothing else belongs there.
 
 resources:
   - namespace.yaml
   - postgres.yaml
   - seed-demo-data.yaml
-  - metastore-db.yaml
-  - hdfs.yaml
-  - hive-metastore.yaml
+  - catalog-db.yaml
+  - minio.yaml
+  - iceberg-rest.yaml
   - trino.yaml
   - kafka.yaml
   - spark.yaml
@@ -30,16 +30,6 @@ generatorOptions:
     app.kubernetes.io/part-of: local-cdc-data-platform
 
 configMapGenerator:
-  - name: hadoop-config
-    namespace: data-pipeline
-    files:
-      - core-site.xml=../../config/hadoop/core-site.xml
-      # Kubernetes needs bind-host + registration-check changes; see overrides/hdfs-site.xml.
-      - hdfs-site.xml=overrides/hdfs-site.xml
-  - name: hive-metastore-config
-    namespace: data-pipeline
-    files:
-      - hive-site.xml=../../config/hive-metastore/hive-site.xml
   - name: trino-etc
     namespace: data-pipeline
     files:
@@ -50,7 +40,6 @@ configMapGenerator:
   - name: trino-catalog
     namespace: data-pipeline
     files:
-      - hive.properties=../../config/trino/catalog/hive.properties
       - iceberg.properties=../../config/trino/catalog/iceberg.properties
   - name: prometheus-config
     namespace: data-pipeline
@@ -104,7 +93,8 @@ configMapGenerator:
   - name: pipeline-scripts
     namespace: data-pipeline
     files:
-      - init_hdfs.py=../../scripts/init_hdfs.py
+      - init_object_store.py=../../scripts/init_object_store.py
+      - init_iceberg_catalog.py=../../scripts/init_iceberg_catalog.py
       - maintain_iceberg.py=../../scripts/maintain_iceberg.py
       # Imported by publish_trino_tables, validate_trino, and maintain_iceberg. Shipping those
       # three without this one leaves them importing a module that is not in the container.

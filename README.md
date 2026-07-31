@@ -4,10 +4,10 @@
 
 A payments data-engineering project that runs **both** dominant analytics paradigms over one domain:
 
-- **Streaming lakehouse (operational):** `Postgres → Debezium/Kafka Connect → Kafka → PySpark → Iceberg on HDFS → Trino` — near-real-time CDC on an open table format.
+- **Streaming lakehouse (operational):** `Postgres → Debezium/Kafka Connect → Kafka → PySpark → Iceberg on S3 → Trino` — near-real-time CDC on an open table format.
 - **Batch cloud warehouse (financial):** `FX REST API + Postgres → AWS S3 → Snowflake + dbt` — incremental batch ELT that normalizes every payment to USD for cross-currency analytics over a star schema.
 
-Shared across both: `Airflow` orchestration, `Terraform` governance (Databricks + Snowflake/S3), `Hive Metastore` as the Iceberg catalog, `Trino` interactive SQL over Iceberg, a `FastAPI` serving tier over gold, `Prometheus + Grafana` observability, and `pytest` + GitHub Actions CI.
+Shared across both: `Airflow` orchestration, `Terraform` governance (Databricks + Snowflake/S3), an `Iceberg REST catalog` over `MinIO`/S3 object storage, `Trino` interactive SQL over Iceberg, a `FastAPI` serving tier over gold, `Prometheus + Grafana` observability, and `pytest` + GitHub Actions CI.
 
 See [docs/design.md](docs/design.md) for layer contracts (both pipelines), incremental processing, and CDC delete handling; [snowflake_etl/README.md](snowflake_etl/README.md) for the Snowflake FX ELT; and [docs/production-readiness.md](docs/production-readiness.md) for the hardening backlog.
 
@@ -17,7 +17,7 @@ The same medallion contract (bronze → silver → gold, CDC-aware) runs three w
 
 | Target | What it is | Entry point |
 |--------|------------|-------------|
-| **Kubernetes (kind)** | The production-shaped deployment — the whole platform as Kustomize manifests (HDFS, Hive Metastore, Trino, Kafka/Debezium, Spark, Airflow, observability) | `bash scripts/k8s_up.sh` |
+| **Kubernetes (kind)** | The production-shaped deployment — the whole platform as Kustomize manifests (MinIO, Iceberg REST catalog, Trino, Kafka/Debezium, Spark, Airflow, observability) | `bash scripts/k8s_up.sh` |
 | **Docker Compose** | The fast inner loop — same services, same config files, one command, no cluster | `docker compose up -d` |
 | **Databricks (Lakeflow)** | Serverless Unity Catalog + Delta port as a Lakeflow Declarative Pipeline — Auto Loader, AUTO CDC, expectations — deployed via an Asset Bundle | [`databricks/`](databricks/README.md) |
 
@@ -25,8 +25,9 @@ Kubernetes is the realistic target: nothing ships to production on Compose. Comp
 it starts in seconds and is the faster edit-run loop — the same split most teams actually run.
 **Both read the identical config files**: the Kustomize ConfigMaps are generated straight from
 `config/`, `airflow/dags/`, `scripts/`, and `sql/`, so the two runtimes cannot drift. The only
-exceptions are three files under [`k8s/base/overrides/`](k8s/base/overrides) that must genuinely
-differ on Kubernetes (pod memory ceilings, bind-host settings), each documenting why in its header.
+exceptions are two files under [`k8s/base/overrides/`](k8s/base/overrides) that must genuinely
+differ on Kubernetes (Trino's heap and query-memory ceilings, sized for a single packed node), each
+documenting why in its header.
 
 ## Architecture
 
@@ -41,7 +42,7 @@ Postgres
   -> Spark bronze job                    Structured Streaming -> Iceberg append
   -> Spark silver job                    foreachBatch -> Iceberg MERGE / DELETE
   -> Spark gold job                      Batch SQL -> Iceberg INSERT OVERWRITE
-  -> Trino                               SQL over Iceberg via Hive Metastore
+  -> Trino                               SQL over Iceberg via the REST catalog
 ```
 
 **Batch cloud warehouse** — a second source (FX rates) staged to S3, USD-normalized in Snowflake:
@@ -58,7 +59,7 @@ FX REST API + Postgres
 
 `Bronze`
 - Raw Kafka envelope written to Iceberg, append-only
-- Streaming with `trigger(availableNow=True)` and HDFS checkpoint
+- Streaming with `trigger(availableNow=True)` and an object-storage checkpoint
 - PII fields (`shopper_id`) hashed with SHA-256 before the write so PII never lands in the lakehouse
 
 `Silver`
@@ -124,7 +125,6 @@ config/api/                    Serving API Docker image
 config/connect/                Debezium connector config
 config/grafana/                Grafana provisioning and dashboards
 config/hadoop/                 Hadoop config
-config/hive-metastore/         Hive metastore config
 config/postgres/init/          Postgres schema and seed data
 config/prometheus/             Prometheus config
 config/spark/jobs/             Spark jobs
@@ -157,7 +157,7 @@ is the faster edit-run loop. Both read the identical config files, so they canno
 ### Kubernetes (production-shaped)
 
 `scripts/k8s_up.sh` creates a local `kind` cluster and applies the Kustomize overlay, rendering the
-full platform: stateful databases, HDFS, Hive Metastore, Trino, Kafka/Connect, Spark job templates,
+full platform: stateful databases, MinIO, the Iceberg REST catalog, Trino, Kafka/Connect, Spark job templates,
 Airflow, the gold serving API, and observability (including provisioned Grafana datasources and
 dashboards). `python3 scripts/validate_k8s_manifests.py` renders the overlay and prints the object
 count. Connector registration, the demo re-seed, and the Spark Jobs ship suspended, so they cannot
@@ -197,18 +197,23 @@ against that same data.
 ### Docker Compose (fast inner loop)
 
 ```bash
+cp .env.example .env                 # placeholder passwords; the file stays untracked
 docker compose up -d
 bash scripts/register_connector.sh   # Kubernetes does this with a Job instead
 ```
 
-All long-running services use `restart: unless-stopped` and expose healthchecks (Kafka, NameNode, DataNode, Trino, Airflow, Postgres variants). Dependent services wait on `condition: service_healthy` before starting, so the stack self-recovers from individual container crashes without manual intervention.
+`scripts/k8s_up.sh` seeds its own `secrets.env` automatically, so the copy above is the one manual
+step Compose has and Kubernetes does not.
+
+All long-running services use `restart: unless-stopped` and expose healthchecks (Kafka, MinIO, Trino, Airflow, Postgres variants). Dependent services wait on `condition: service_healthy` before starting, so the stack self-recovers from individual container crashes without manual intervention.
 
 Compose publishes fixed host ports, so the UIs are reachable directly:
 
 - Airflow: `http://localhost:8088`
 - Kafka Connect: `http://localhost:8083`
 - Trino: `http://localhost:8080`
-- HDFS NameNode UI: `http://localhost:9870`
+- MinIO console: `http://localhost:9001`
+- Iceberg REST catalog: `http://localhost:8181/health`
 - Payments Gold API: `http://localhost:8000/` (console) · `/docs` (OpenAPI UI)
 - Prometheus: `http://localhost:9090`
 - Grafana: `http://localhost:3001`
@@ -279,16 +284,17 @@ Everything is verifiable offline (mocked S3, fake Snowflake cursor, `terraform v
 
 The main DAG is `airflow/dags/payments_pipeline.py`, and it orchestrates **both** runtimes:
 
-1. `init_hdfs` — creates the warehouse and checkpoint directories over **WebHDFS**
-2. `validate_connector` — Debezium connector and task are `RUNNING`
-3. `validate_schema` — source schema matches what the pipeline expects
-4. `bronze_load` · `silver_transform` · `gold_transform` — the Spark medallion
-5. `publish_trino_tables` — the Iceberg tables are visible to Trino (and **fails** if one is missing)
-6. `validate_trino` — bronze = silver = gold reconciliation
-7. `maintain_iceberg` — compaction, snapshot expiry, orphan cleanup
+1. `init_object_store` — creates the warehouse and checkpoint buckets over the **S3 API**
+2. `init_catalog` — bootstraps the Iceberg REST catalog and registers the warehouse
+3. `validate_connector` — Debezium connector and task are `RUNNING`
+4. `validate_schema` — source schema matches what the pipeline expects
+5. `bronze_load` · `silver_transform` · `gold_transform` — the Spark medallion
+6. `publish_trino_tables` — the Iceberg tables are visible to Trino (and **fails** if one is missing)
+7. `validate_trino` — bronze = silver = gold reconciliation
+8. `maintain_iceberg` — compaction, snapshot expiry, orphan cleanup
 
 Every task except the three Spark ones is **runtime-neutral**: it speaks HTTP to a service name
-(`trino:8080`, `namenode:9870`) that resolves as a Compose service name and a Kubernetes Service
+(`trino:8080`, `minio:9000`, `iceberg-rest:8181`) that resolves as a Compose service name and a Kubernetes Service
 DNS name alike. No task shells into a container by name.
 
 Spark submission is the one thing that genuinely differs, because Compose has no cluster to
@@ -429,7 +435,7 @@ This project is easiest to understand when viewed from three angles:
 
 Airflow shows the pipeline running from source validation through bronze, silver, gold, and downstream validation.
 
-![Airflow graph view of a successful payments_pipeline run on Kubernetes — nine tasks green, with bronze_load, silver_transform and gold_transform running as KubernetesPodOperator and the rest as BashOperator](docs/images/airflow-payments-pipeline.png)
+![Airflow graph view of a successful payments_pipeline run on Kubernetes — ten tasks green, with bronze_load, silver_transform and gold_transform running as KubernetesPodOperator and the rest as BashOperator](docs/images/airflow-payments-pipeline.png)
 
 Grafana shows the seeded demo data as business-facing metrics, including volume, authorization rate, refunds, and payment method mix.
 

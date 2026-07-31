@@ -22,13 +22,11 @@ class K8sObject:
 REQUIRED_OBJECTS = {
     ("Namespace", "data-pipeline"),
     ("StatefulSet", "postgres"),
-    ("StatefulSet", "metastore-db"),
-    ("StatefulSet", "namenode"),
-    ("StatefulSet", "datanode"),
+    ("StatefulSet", "catalog-db"),
     ("StatefulSet", "kafka"),
-    ("Job", "hdfs-init"),
-    ("Deployment", "hive-metastore"),
     ("Deployment", "trino"),
+    ("Deployment", "minio"),
+    ("Deployment", "iceberg-rest"),
     ("Deployment", "kafka-connect"),
     ("Deployment", "airflow-webserver"),
     ("Deployment", "airflow-scheduler"),
@@ -155,31 +153,6 @@ def find_dead_service_precondition_envs(objects: list[K8sObject]) -> list[str]:
     return sorted(gaps)
 
 
-def find_spark_hadoop_directory_mounts(objects: list[K8sObject]) -> list[str]:
-    gaps: list[str] = []
-    spark_jobs = {"spark-bronze", "spark-silver", "spark-gold"}
-    for obj in objects:
-        if obj.kind != "Job" or obj.name not in spark_jobs:
-            continue
-        containers = obj.raw.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
-        for container in containers:
-            for mount in container.get("volumeMounts", []):
-                if mount.get("name") == "hadoop-config" and mount.get("mountPath") == "/opt/spark/conf":
-                    gaps.append(f"Job/{obj.name}")
-    return sorted(gaps)
-
-
-def find_hdfs_init_readiness_gaps(objects: list[K8sObject]) -> list[str]:
-    for obj in objects:
-        if obj.kind == "Job" and obj.name == "hdfs-init":
-            containers = obj.raw.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
-            command_text = "\n".join(_container_command_text(container) for container in containers)
-            if "hdfs dfsadmin -report" not in command_text or "Live datanodes" not in command_text:
-                return ["Job/hdfs-init"]
-            return []
-    return ["Job/hdfs-init"]
-
-
 def find_trino_memory_config_gaps(objects: list[K8sObject]) -> list[str]:
     for obj in objects:
         if obj.kind == "ConfigMap" and obj.name == "trino-etc":
@@ -231,14 +204,6 @@ def validate(objects: list[K8sObject]) -> list[str]:
     airflow_dag_mount_gaps = find_airflow_dag_directory_mounts(objects)
     if airflow_dag_mount_gaps:
         errors.append(f"Airflow DAG ConfigMap must be mounted via subPath, not as a directory: {airflow_dag_mount_gaps}")
-
-    spark_mount_gaps = find_spark_hadoop_directory_mounts(objects)
-    if spark_mount_gaps:
-        errors.append(f"Spark jobs replace /opt/spark/conf with Hadoop config: {spark_mount_gaps}")
-
-    hdfs_init_gaps = find_hdfs_init_readiness_gaps(objects)
-    if hdfs_init_gaps:
-        errors.append(f"HDFS init does not wait for a live DataNode: {hdfs_init_gaps}")
 
     trino_memory_gaps = find_trino_memory_config_gaps(objects)
     if trino_memory_gaps:

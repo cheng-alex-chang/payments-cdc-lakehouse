@@ -48,6 +48,11 @@ spec:
           ports:
             - name: http
               containerPort: 8080
+          env:
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_USER } }
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_PASSWORD } }
           readinessProbe:
             httpGet:
               path: /v1/info
@@ -74,8 +79,6 @@ spec:
               subPath: node.properties
             - name: trino-catalog
               mountPath: /etc/trino/catalog
-            - name: hadoop-config
-              mountPath: /etc/hadoop/conf
             - name: trino-data
               mountPath: /var/trino/data
       volumes:
@@ -85,8 +88,5 @@ spec:
         - name: trino-catalog
           configMap:
             name: trino-catalog
-        - name: hadoop-config
-          configMap:
-            name: hadoop-config
         - name: trino-data
           emptyDir: {}

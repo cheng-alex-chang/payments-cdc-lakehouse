@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 
+from common import configure_iceberg, checkpoint_path
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, udf
 from pyspark.sql.types import StringType
@@ -12,7 +13,7 @@ from pyspark.sql.types import StringType
 KAFKA_BOOTSTRAP = "kafka:29092"
 KAFKA_TOPIC     = "cdc.public.payments"
 BRONZE_TABLE    = "iceberg.analytics.payments_bronze"
-CHECKPOINT_PATH = "hdfs://namenode:9000/checkpoints/bronze"
+CHECKPOINT_PATH = checkpoint_path("bronze")
 
 # Fields hashed before writing to Bronze so PII never lands in the lakehouse.
 PII_FIELDS = {"shopper_id"}
@@ -41,14 +42,9 @@ def _mask_pii_fields(value: str | None) -> str | None:
 def main() -> None:
     LOGGER.info("Starting bronze Kafka ingestion from topic '%s'", KAFKA_TOPIC)
     spark = (
-        SparkSession.builder
-        .appName("bronze-from-kafka")
-        .config("spark.sql.extensions",
-                "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
-        .config("spark.sql.catalog.iceberg",          "org.apache.iceberg.spark.SparkCatalog")
-        .config("spark.sql.catalog.iceberg.type",     "hive")
-        .config("spark.sql.catalog.iceberg.uri",      "thrift://hive-metastore:9083")
-        .config("spark.sql.catalog.iceberg.warehouse","hdfs://namenode:9000/warehouse")
+        configure_iceberg(
+            SparkSession.builder.appName("bronze-from-kafka")
+        )
         .getOrCreate()
     )
 

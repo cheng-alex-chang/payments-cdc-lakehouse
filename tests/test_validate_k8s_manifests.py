@@ -52,7 +52,7 @@ def test_find_missing_required_reports_absent_objects() -> None:
 
     missing = module.find_missing_required(objects)
 
-    assert ("StatefulSet", "metastore-db") in missing
+    assert ("StatefulSet", "catalog-db") in missing
     assert ("StatefulSet", "postgres") not in missing
 
 
@@ -115,7 +115,7 @@ spec:
     assert gaps == ["Deployment/airflow-webserver"]
 
 
-def test_find_dead_service_precondition_envs_flags_ignored_hadoop_env() -> None:
+def test_find_dead_service_precondition_envs_flags_ignored_env() -> None:
     manifest = """
 apiVersion: apps/v1
 kind: StatefulSet
@@ -172,51 +172,6 @@ spec:
     gaps = module.find_airflow_dag_directory_mounts(module.parse_objects(manifest))
 
     assert gaps == ["Deployment/airflow-scheduler/scheduler"]
-
-
-def test_find_spark_hadoop_directory_mounts_flags_conf_replacement() -> None:
-    manifest = """
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: spark-bronze
-  namespace: data-pipeline
-spec:
-  template:
-    spec:
-      containers:
-        - name: spark
-          volumeMounts:
-            - name: hadoop-config
-              mountPath: /opt/spark/conf
-"""
-
-    gaps = module.find_spark_hadoop_directory_mounts(module.parse_objects(manifest))
-
-    assert gaps == ["Job/spark-bronze"]
-
-
-def test_find_hdfs_init_readiness_gaps_requires_datanode_wait() -> None:
-    manifest = """
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: hdfs-init
-  namespace: data-pipeline
-spec:
-  template:
-    spec:
-      containers:
-        - name: hdfs-init
-          command:
-            - /bin/bash
-            - -lc
-            - hdfs dfs -mkdir -p /warehouse
-"""
-
-    gaps = module.find_hdfs_init_readiness_gaps(module.parse_objects(manifest))
-
-    assert gaps == ["Job/hdfs-init"]
 
 
 def test_find_trino_memory_config_gaps_requires_per_node_caps() -> None:
@@ -412,7 +367,7 @@ BASE_KUSTOMIZATION = K8S_BASE / "kustomization.yaml"
 
 # The only files allowed to differ between the Compose and Kubernetes runtimes. Each needs a
 # genuine Kubernetes reason (pod memory ceilings, bind-host settings) documented in its header.
-EXPECTED_OVERRIDES = {"hdfs-site.xml", "trino-config.properties", "trino-jvm.config"}
+EXPECTED_OVERRIDES = {"trino-config.properties", "trino-jvm.config"}
 
 
 def _generator_file_paths() -> list[str]:
@@ -461,18 +416,24 @@ def test_overrides_directory_holds_only_the_documented_files() -> None:
     assert present == EXPECTED_OVERRIDES
 
 
-def test_every_xml_config_file_is_well_formed() -> None:
-    """Hadoop and Hive reject an unparseable config outright rather than skipping it.
+def test_every_xml_document_is_well_formed() -> None:
+    """XML forbids a double hyphen inside a comment, and it is very easy to type.
 
-    A malformed hdfs-site.xml crash-loops the NameNode, which takes HDFS, Hive Metastore, Spark,
-    and Trino down with it -- twenty minutes into a cluster spin-up, with a stack trace that
-    names a Woodstox parser rather than the file you edited. The trap that bites is XML's rule
-    that a comment may not contain a double hyphen, which is easy to type as an em-dash.
+    This has now cost real time twice. A malformed hdfs-site.xml crash-looped the NameNode twenty
+    minutes into a cluster spin-up, with a stack trace naming a Woodstox parser rather than the file
+    that was edited. Later the same mistake made docs/favicon.svg unparseable.
+
+    HDFS and Hive are gone, so no XML *config* remains -- but SVG is XML, and the repo has several
+    hand-authored ones. The check is kept and widened rather than deleted, because the bug class
+    outlived the files that first triggered it. It passes vacuously if a category disappears; that
+    is the intended behaviour, not a gap.
     """
-    xml_files = sorted(REPO_ROOT.glob("config/**/*.xml")) + sorted((K8S_BASE / "overrides").glob("*.xml"))
+    documents = sorted(REPO_ROOT.glob("config/**/*.xml"))
+    documents += sorted((K8S_BASE / "overrides").glob("*.xml"))
+    documents += sorted(REPO_ROOT.glob("docs/*.svg")) + sorted(REPO_ROOT.glob("docs/images/*.svg"))
 
-    assert xml_files, "expected XML config files to exist"
-    for path in xml_files:
+    assert documents, "expected some hand-authored XML or SVG to check"
+    for path in documents:
         ElementTree.parse(path)  # raises ParseError on malformed input
 
 
@@ -724,39 +685,6 @@ def test_spark_jobs_declare_memory_requests_and_limits() -> None:
         assert "--driver-memory" in command
 
 
-def test_hdfs_services_are_headless_so_per_pod_dns_resolves() -> None:
-    """HDFS is the one subsystem here that genuinely needs stable per-pod DNS.
-
-    hdfs-site.xml sets dfs.datanode.use.datanode.hostname=true, so the DataNode registers under
-    datanode-0.datanode.<ns>.svc.cluster.local and every HDFS *client* resolves that name to read
-    blocks. StatefulSet per-pod DNS only exists when the governing Service is headless. With a
-    ClusterIP the name does not resolve, and the failure is asymmetric and confusing: writes go
-    through the NameNode and appear fine, reads die with UnknownHostException.
-
-    The other StatefulSets (postgres, kafka, metastore-db, airflow-postgres) are addressed by
-    service name only, so a ClusterIP is correct for them and this guard deliberately excludes
-    them.
-    """
-    services = {}
-    stateful_sets = {}
-    for doc in yaml.safe_load_all((K8S_BASE / "hdfs.yaml").read_text(encoding="utf-8")):
-        if not doc:
-            continue
-        if doc["kind"] == "Service":
-            services[doc["metadata"]["name"]] = doc["spec"]
-        elif doc["kind"] == "StatefulSet":
-            stateful_sets[doc["metadata"]["name"]] = doc["spec"]
-
-    for name in ("namenode", "datanode"):
-        # "None" is a string in the Kubernetes API, not a YAML null.
-        assert services[name].get("clusterIP") == "None", f"{name} Service must be headless"
-        assert stateful_sets[name]["serviceName"] == name
-
-    # 9866 is the block-transfer port clients connect to directly; the Service described only the
-    # web UI before, which made the intent of the manifest misleading.
-    datanode_ports = {port["port"] for port in services["datanode"]["ports"]}
-    assert 9866 in datanode_ports
-
 
 def test_snowflake_dag_is_excluded_from_the_cluster() -> None:
     # snowflake_fx_etl.py imports SnowflakeOperator and snowflake_etl.src, neither of which is in
@@ -969,3 +897,80 @@ def test_container_images_are_pinned_to_a_version() -> None:
                 unpinned.append(f"{path.name}:{number} {image}")
 
     assert not unpinned, f"unpinned images: {unpinned}"
+
+
+def test_shell_scripts_reference_no_deleted_paths() -> None:
+    """A script that builds a deleted directory fails twenty minutes into a cluster spin-up.
+
+    scripts/k8s_up.sh kept building local/hive-metastore:dev after config/hive-metastore/ was
+    removed, and nothing caught it -- the manifests rendered fine, every test passed, and the
+    failure only appeared on the next cold start. Paths referenced by shell scripts are as much a
+    dependency as an import.
+    """
+    import re
+
+    for script in sorted((REPO_ROOT / "scripts").glob("*.sh")):
+        text = script.read_text(encoding="utf-8")
+        for match in re.finditer(r"(?:^|\s)((?:config|drivers|k8s|airflow|sql)/[A-Za-z0-9_./-]+)", text):
+            candidate = (REPO_ROOT / match.group(1).rstrip(".,;:"))
+            # A gitignored file the script creates from a committed template is legitimately
+            # absent -- secrets.env is copied from secrets.env.example on first run, so it exists
+            # locally and never in CI. Accept the template as proof the reference is live.
+            if candidate.exists() or candidate.with_suffix(candidate.suffix + ".example").exists():
+                continue
+            raise AssertionError(
+                f"{script.name} references {candidate.relative_to(REPO_ROOT)}, which does not exist"
+            )
+
+
+def test_verify_script_checks_only_configmaps_that_exist() -> None:
+    """k8s_verify.sh asserted `hadoop-config` for a full cluster spin-up after it was deleted.
+
+    Same class as the workload arrays: a hand-written name that must match generated output, with
+    nothing comparing them. The failure is expensive because it lands eleven minutes in, after the
+    platform is already up.
+    """
+    import re
+
+    text = (REPO_ROOT / "scripts" / "k8s_verify.sh").read_text(encoding="utf-8")
+    asserted = set(re.findall(r"get configmap (\S+)", text))
+
+    kustomization = yaml.safe_load((K8S_BASE / "kustomization.yaml").read_text(encoding="utf-8"))
+    generated = {entry["name"] for entry in kustomization.get("configMapGenerator", [])}
+    for path in sorted(K8S_BASE.glob("*.yaml")):
+        for doc in yaml.safe_load_all(path.read_text(encoding="utf-8")):
+            if doc and doc.get("kind") == "ConfigMap":
+                generated.add(doc["metadata"]["name"])
+
+    missing = asserted - generated
+    assert not missing, f"k8s_verify.sh checks ConfigMaps that are never generated: {sorted(missing)}"
+
+
+def test_every_configmap_volume_references_one_that_exists() -> None:
+    """A volume naming a deleted ConfigMap blocks the pod at ContainerCreating, not at apply.
+
+    Deleting the hadoop-config generator in Phase 4 left three references behind -- k8s_up.sh, the
+    verify script, and a volume in trino.yaml. The first two failed fast; this one wedged Trino in
+    ContainerCreating with FailedMount for seven minutes and did not surface until the whole
+    platform had otherwise come up.
+
+    kubectl apply accepts it happily: a volume may name a ConfigMap that does not exist yet. That
+    tolerance is deliberate and useful, and it is exactly why it needs a check here.
+    """
+    kustomization = yaml.safe_load((K8S_BASE / "kustomization.yaml").read_text(encoding="utf-8"))
+    available = {entry["name"] for entry in kustomization.get("configMapGenerator", [])}
+    referenced: list[tuple[str, str]] = []
+
+    for path in sorted(K8S_BASE.glob("*.yaml")):
+        for doc in yaml.safe_load_all(path.read_text(encoding="utf-8")):
+            if not doc:
+                continue
+            if doc.get("kind") == "ConfigMap":
+                available.add(doc["metadata"]["name"])
+            spec = doc.get("spec", {}).get("template", {}).get("spec", {})
+            for volume in spec.get("volumes", []):
+                if "configMap" in volume:
+                    referenced.append((doc["metadata"]["name"], volume["configMap"]["name"]))
+
+    dangling = sorted({f"{owner} -> {name}" for owner, name in referenced if name not in available})
+    assert not dangling, f"volumes reference ConfigMaps that are never created: {dangling}"

@@ -95,13 +95,15 @@ spec:
             - --conf
             - spark.jars.ivy=/tmp/.ivy2
             - --packages
-            - org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.8,org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1
+            - org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.8,org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1,org.apache.iceberg:iceberg-aws-bundle:1.6.1,org.apache.hadoop:hadoop-aws:3.3.4
             - /opt/project/config/spark/jobs/bronze_from_kafka.py
           env:
             - name: HOME
               value: /tmp
-            - name: HADOOP_CONF_DIR
-              value: /opt/spark/conf
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_USER } }
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_PASSWORD } }
           # An unbounded Spark driver is the classic way to take a Kubernetes node down: with no
           # requests the scheduler cannot reason about the pod at all, and with no limit the JVM
           # grows until the kernel picks a victim. The limit is roughly twice the driver heap to
@@ -115,19 +117,10 @@ spec:
           volumeMounts:
             - name: spark-jobs
               mountPath: /opt/project/config/spark/jobs
-            - name: hadoop-config
-              mountPath: /opt/spark/conf/core-site.xml
-              subPath: core-site.xml
-            - name: hadoop-config
-              mountPath: /opt/spark/conf/hdfs-site.xml
-              subPath: hdfs-site.xml
       volumes:
         - name: spark-jobs
           configMap:
             name: spark-jobs
-        - name: hadoop-config
-          configMap:
-            name: hadoop-config
 ---
 apiVersion: batch/v1
 kind: Job
@@ -165,13 +158,15 @@ spec:
             - --conf
             - spark.jars.ivy=/tmp/.ivy2
             - --packages
-            - org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1
+            - org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1,org.apache.iceberg:iceberg-aws-bundle:1.6.1,org.apache.hadoop:hadoop-aws:3.3.4
             - /opt/project/config/spark/jobs/silver_payments.py
           env:
             - name: HOME
               value: /tmp
-            - name: HADOOP_CONF_DIR
-              value: /opt/spark/conf
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_USER } }
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_PASSWORD } }
           # An unbounded Spark driver is the classic way to take a Kubernetes node down: with no
           # requests the scheduler cannot reason about the pod at all, and with no limit the JVM
           # grows until the kernel picks a victim. The limit is roughly twice the driver heap to
@@ -185,19 +180,10 @@ spec:
           volumeMounts:
             - name: spark-jobs
               mountPath: /opt/project/config/spark/jobs
-            - name: hadoop-config
-              mountPath: /opt/spark/conf/core-site.xml
-              subPath: core-site.xml
-            - name: hadoop-config
-              mountPath: /opt/spark/conf/hdfs-site.xml
-              subPath: hdfs-site.xml
       volumes:
         - name: spark-jobs
           configMap:
             name: spark-jobs
-        - name: hadoop-config
-          configMap:
-            name: hadoop-config
 ---
 apiVersion: batch/v1
 kind: Job
@@ -235,13 +221,15 @@ spec:
             - --conf
             - spark.jars.ivy=/tmp/.ivy2
             - --packages
-            - org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1
+            - org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1,org.apache.iceberg:iceberg-aws-bundle:1.6.1,org.apache.hadoop:hadoop-aws:3.3.4
             - /opt/project/config/spark/jobs/gold_metrics.py
           env:
             - name: HOME
               value: /tmp
-            - name: HADOOP_CONF_DIR
-              value: /opt/spark/conf
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_USER } }
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_PASSWORD } }
           # An unbounded Spark driver is the classic way to take a Kubernetes node down: with no
           # requests the scheduler cannot reason about the pod at all, and with no limit the JVM
           # grows until the kernel picks a victim. The limit is roughly twice the driver heap to
@@ -255,16 +243,7 @@ spec:
           volumeMounts:
             - name: spark-jobs
               mountPath: /opt/project/config/spark/jobs
-            - name: hadoop-config
-              mountPath: /opt/spark/conf/core-site.xml
-              subPath: core-site.xml
-            - name: hadoop-config
-              mountPath: /opt/spark/conf/hdfs-site.xml
-              subPath: hdfs-site.xml
       volumes:
         - name: spark-jobs
           configMap:
             name: spark-jobs
-        - name: hadoop-config
-          configMap:
-            name: hadoop-config

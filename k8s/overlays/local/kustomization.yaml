@@ -11,14 +11,6 @@ labels:
   - pairs:
       app.kubernetes.io/managed-by: kustomize
 
-configMapGenerator:
-  - name: local-runtime-notes
-    namespace: data-pipeline
-    literals:
-      - runtime=kind
-      - warehouse=hdfs://namenode:9000/warehouse
-      - kafkaBootstrap=kafka:29092
-
 # Passwords come from secrets.env (gitignored; copy secrets.env.example and edit).
 # Only non-secret identifiers stay as committed literals -- no credentials in git,
 # matching the Compose .env / .env.example pattern.
@@ -28,10 +20,14 @@ secretGenerator:
     literals:
       - POSTGRES_DB=payments
       - POSTGRES_USER=dataeng
-      - METASTORE_DB=metastore
-      - METASTORE_USER=hive
+      - CATALOG_DB=catalog
+      - CATALOG_USER=catalog
       - AIRFLOW_DB=airflow
       - AIRFLOW_USER=airflow
       - AIRFLOW_ADMIN_USERNAME=admin
+      # MinIO's root user doubles as the S3 access key. Consumers reference this key but name the
+      # env var S3_ACCESS_KEY -- one source of truth, and nothing outside minio.yaml mentions MinIO
+      # by name, so pointing the platform at real S3 is a value change.
+      - MINIO_ROOT_USER=payments
     envs:
       - secrets.env

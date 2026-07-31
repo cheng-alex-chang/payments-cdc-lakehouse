@@ -12,8 +12,8 @@ The current Kubernetes path has a full local-platform manifest set:
 - `scripts/k8s_up.sh` creates a local `kind` cluster (via the `kind` CLI).
 - Kustomize applies the `data-pipeline` namespace.
 - Kustomize generates shared ConfigMaps and Secrets from the existing repo config files and local overlay values.
-- Kubernetes defines source Postgres, metastore database, HDFS NameNode/DataNode, Hive Metastore, Trino, Kafka (KRaft)/Kafka Connect, connector registration, Spark bronze/silver/gold job templates, Airflow, the gold serving API, and Prometheus/exporters/Grafana.
-- An `hdfs-init` Job prepares local warehouse and checkpoint directories for Spark writes.
+- Kubernetes defines source Postgres, the catalog database, MinIO object storage, the Iceberg REST catalog, Trino, Kafka (KRaft)/Kafka Connect, connector registration, Spark bronze/silver/gold job templates, Airflow, the gold serving API, and Prometheus/exporters/Grafana.
+- The warehouse and checkpoint buckets are created by the DAG's `init_object_store` task over the S3 API; `init_catalog` then registers the warehouse with the catalog. Both are idempotent.
 - Connector registration, the demo re-seed, and Spark job manifests are suspended by default so they do not run before their dependencies are Ready.
 
 ## One Source of Config
@@ -37,19 +37,20 @@ kubectl kustomize --load-restrictor=LoadRestrictionsNone k8s/overlays/local
 The documented tradeoff is that the kustomization is no longer relocatable — irrelevant here, since
 it is repo-local and never vendored into another tree.
 
-### The three legitimate overrides
+### The two legitimate overrides
 
-Three files genuinely must differ on Kubernetes, and they live in `k8s/base/overrides/` with a
-header comment in each explaining why:
+Two files genuinely must differ on Kubernetes, and they live in `k8s/base/overrides/` with a
+header comment in each explaining why. There were three until the storage migration removed
+`hdfs-site.xml` — a third of that directory existed only to make the NameNode bind correctly
+inside a pod network.
 
 | File | Why it differs |
 |------|----------------|
-| `hdfs-site.xml` | NameNode must bind `0.0.0.0` rather than the Service DNS name, and DataNode registration's reverse-DNS check must be off — pod IPs have no matching PTR record |
-| `trino-jvm.config` | `-Xmx512M` instead of `-Xmx2G`; kind packs the whole platform onto one node, so a 2 GB Trino heap starves the Spark, Kafka, and HDFS pods |
+| `trino-jvm.config` | `-Xmx512M` instead of `-Xmx2G`; kind packs the whole platform onto one node, so a 2 GB Trino heap starves the Spark and Kafka pods |
 | `trino-config.properties` | Adds four query-memory ceilings for the same reason; without them Trino sizes pools off total container memory and is OOMKilled under Iceberg scans |
 
 `tests/test_validate_k8s_manifests.py` guards all of this: no generator path may point back into a
-forked config tree, every referenced file must exist, `overrides/` must contain exactly these three
+forked config tree, every referenced file must exist, `overrides/` must contain exactly these two
 files, and each must document its rationale. The drift cannot silently return.
 
 ## Reaching a UI
@@ -61,9 +62,10 @@ command runs in the foreground until interrupted:
 kubectl port-forward -n data-pipeline svc/airflow-webserver 8088:8080   # Airflow
 kubectl port-forward -n data-pipeline svc/trino 8080:8080               # Trino
 kubectl port-forward -n data-pipeline svc/api 8000:8000                 # Gold API (/docs)
+kubectl port-forward -n data-pipeline svc/minio 9001:9001               # MinIO console
+kubectl port-forward -n data-pipeline svc/iceberg-rest 8181:8181        # Iceberg REST catalog
 kubectl port-forward -n data-pipeline svc/prometheus 9090:9090          # Prometheus
 kubectl port-forward -n data-pipeline svc/grafana 3001:3000             # Grafana
-kubectl port-forward -n data-pipeline svc/namenode 9870:9870            # HDFS NameNode UI
 ```
 
 The left-hand port matches the Compose URL in the [README](../README.md#docker-compose-fast-inner-loop)
@@ -85,7 +87,7 @@ been verified end to end on a local `kind` cluster running the *current* archite
 real files:
 
 - all core pods Ready in the `data-pipeline` namespace
-- HDFS warehouse/checkpoint initialization
+- warehouse and checkpoint bucket creation, then catalog warehouse registration
 - source Postgres seed validation (row counts reconcile end to end)
 - Debezium connector registration with connector and task `RUNNING`
 - Airflow scheduler parsing the `payments_pipeline` DAG with no import errors (each DAG file is mounted via `subPath` — `payments_pipeline.py` and the `alerts.py` module it imports — so the walker never follows the `..data` symlink into a recursive loop)
@@ -98,15 +100,16 @@ real files:
 
 Airflow drives the pipeline on the cluster, not just on Compose. That distinction used to be
 hollow: every task was a `BashOperator` running a script that shelled into a Compose container by
-name (`docker exec dp-trino`, `docker exec dp-spark`, `docker exec dp-namenode`). Airflow on
+name (`docker exec dp-trino`, `docker exec dp-spark`). Airflow on
 Kubernetes parsed the DAG but its tasks would have failed if triggered, so the cluster ran its
 Spark jobs through `kubectl patch` on suspended Job templates instead.
 
 Two changes closed that:
 
 **Most tasks became runtime-neutral rather than branching.** Trino work goes over Trino's HTTP
-protocol (`scripts/trino_http.py`) and HDFS setup over WebHDFS (`scripts/init_hdfs.py`). Both
-address services by name — `trino:8080`, `namenode:9870` — which resolves as a Compose service
+protocol (`scripts/trino_http.py`), storage setup over the S3 API (`scripts/init_object_store.py`),
+and catalog setup over HTTP (`scripts/init_iceberg_catalog.py`). All address services by name —
+`trino:8080`, `minio:9000`, `iceberg-rest:8181` — which resolves as a Compose service
 name and a Kubernetes Service DNS name alike. No branch, no duplicated logic; the same code runs
 in both.
 
@@ -133,7 +136,7 @@ production-like driver/executor split. That is a scale limitation, not a runtime
 ## Resource Declarations
 
 Every container declares a memory request and limit. This is not boilerplate: before it was added,
-Trino was OOM-killed 15 times, `spark-gold` was OOM-killed on every attempt, and Hive Metastore
+Trino was OOM-killed 15 times, `spark-gold` was OOM-killed on every attempt, and Hive Metastore (since removed)
 crash-looped — while the node reported 290Mi requested and `MemoryPressure=False`. With no request
 the scheduler treats a pod as free and packs the node; with no limit a JVM sizes its heap off total
 node memory rather than its own cgroup, so the kernel picks a victim that may not even be the
@@ -151,8 +154,9 @@ budget, so a newly added service cannot quietly make `scripts/k8s_up.sh` unsched
 
 The memory figure is a real requirement, not a suggestion. Steady-state requests come to ~5.8 GiB
 and a Spark job adds 1 GiB, so the platform needs roughly 6.8 GiB reserved before the kubelet,
-system pods, and the burst between each pod's request and its limit. At 8 GiB the NameNode is
-OOM-killed partway through a run and takes HDFS, Hive Metastore, Spark, and Trino down with it.
+system pods, and the burst between each pod's request and its limit. That figure predates the
+storage migration, which cut roughly 3 GiB from declared limits by removing HDFS and Hive
+Metastore; the platform now fits comfortably under it.
 `tests/test_validate_k8s_manifests.py` keeps the declared footprint inside that budget.
 
 ## Start the Local Cluster
@@ -178,7 +182,7 @@ KUBECONFIG=.kind/kubeconfig kubectl kustomize \
   | KUBECONFIG=.kind/kubeconfig kubectl apply -f -
 ```
 
-The script also builds and loads the local Airflow, Hive Metastore, and Trino exporter images into the kind cluster.
+The script also builds and loads the local Airflow, serving API, and Trino exporter images into the kind cluster.
 
 Cluster passwords come from `k8s/overlays/local/secrets.env` (gitignored). On first run the script seeds it from `secrets.env.example` with placeholder values — edit it to change local credentials; real values never land in git, mirroring the Compose `.env` / `.env.example` pattern.
 
@@ -197,9 +201,7 @@ Expected baseline result after dependencies pull and start:
 
 ```text
 statefulset.apps/postgres        1/1
-statefulset.apps/metastore-db    1/1
-statefulset.apps/namenode        1/1
-statefulset.apps/datanode        1/1
+statefulset.apps/catalog-db      1/1
 persistentvolumeclaim/...        Bound
 ```
 
@@ -266,7 +268,7 @@ nothing checks is how the last round of drift happened. So:
   add it to `scripts/k8s_verify.sh` in the same change — `tests/test_validate_k8s_manifests.py`
   fails if the script and `k8s/base/` disagree, and if a port-forward above names a port the
   Service does not expose.
-- Prefer dependency-focused verification over broad claims: that Hive Metastore reaches its
+- Prefer dependency-focused verification over broad claims: that the catalog reaches its
   database, that Trino queries Iceberg metadata, that Kafka Connect holds the Debezium connector.
 - Update [design.md](design.md) when runtime behavior or a limitation changes, not for manifest
   inventory churn.

@@ -159,6 +159,14 @@ spec:
               value: postgresql+psycopg2://$(AIRFLOW_USER):$(AIRFLOW_PASSWORD)@airflow-postgres/$(AIRFLOW_DB)
             - name: AIRFLOW__CORE__LOAD_EXAMPLES
               value: "false"
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_USER } }
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_PASSWORD } }
+            - name: S3_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_USER } }
+            - name: S3_SECRET_KEY
+              valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_PASSWORD } }
           volumeMounts:
             # Mount each DAG file via subPath so Kubernetes materializes plain files, not a
             # ConfigMap directory. A directory mount carries the atomic-update `..data`
@@ -248,6 +256,14 @@ spec:
               value: postgresql+psycopg2://$(AIRFLOW_USER):$(AIRFLOW_PASSWORD)@airflow-postgres/$(AIRFLOW_DB)
             - name: AIRFLOW__CORE__LOAD_EXAMPLES
               value: "false"
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_USER } }
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_PASSWORD } }
+            - name: S3_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_USER } }
+            - name: S3_SECRET_KEY
+              valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_PASSWORD } }
           command:
             - /bin/bash
             - -lc
@@ -292,6 +308,14 @@ spec:
               value: postgresql+psycopg2://$(AIRFLOW_USER):$(AIRFLOW_PASSWORD)@airflow-postgres/$(AIRFLOW_DB)
             - name: AIRFLOW__CORE__LOAD_EXAMPLES
               value: "false"
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_USER } }
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_PASSWORD } }
+            - name: S3_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_USER } }
+            - name: S3_SECRET_KEY
+              valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_PASSWORD } }
             - name: AIRFLOW__METRICS__STATSD_ON
               value: "true"
             - name: AIRFLOW__METRICS__STATSD_HOST
@@ -383,6 +407,14 @@ spec:
               value: postgresql+psycopg2://$(AIRFLOW_USER):$(AIRFLOW_PASSWORD)@airflow-postgres/$(AIRFLOW_DB)
             - name: AIRFLOW__CORE__LOAD_EXAMPLES
               value: "false"
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_USER } }
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_PASSWORD } }
+            - name: S3_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_USER } }
+            - name: S3_SECRET_KEY
+              valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_PASSWORD } }
           command:
             - /bin/bash
             - -lc
@@ -433,6 +465,14 @@ spec:
               value: postgresql+psycopg2://$(AIRFLOW_USER):$(AIRFLOW_PASSWORD)@airflow-postgres/$(AIRFLOW_DB)
             - name: AIRFLOW__CORE__LOAD_EXAMPLES
               value: "false"
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_USER } }
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_PASSWORD } }
+            - name: S3_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_USER } }
+            - name: S3_SECRET_KEY
+              valueFrom: { secretKeyRef: { name: platform-secrets, key: MINIO_ROOT_PASSWORD } }
             - name: AIRFLOW__METRICS__STATSD_ON
               value: "true"
             - name: AIRFLOW__METRICS__STATSD_HOST
