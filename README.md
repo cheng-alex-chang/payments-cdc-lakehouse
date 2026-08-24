@@ -124,7 +124,6 @@ config/airflow/                Airflow Docker image
 config/api/                    Serving API Docker image
 config/connect/                Debezium connector config
 config/grafana/                Grafana provisioning and dashboards
-config/hadoop/                 Hadoop config
 config/postgres/init/          Postgres schema and seed data
 config/prometheus/             Prometheus config
 config/spark/jobs/             Spark jobs

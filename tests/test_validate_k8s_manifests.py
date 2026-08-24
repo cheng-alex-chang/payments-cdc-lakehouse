@@ -974,3 +974,25 @@ def test_every_configmap_volume_references_one_that_exists() -> None:
 
     dangling = sorted({f"{owner} -> {name}" for owner, name in referenced if name not in available})
     assert not dangling, f"volumes reference ConfigMaps that are never created: {dangling}"
+
+
+def test_readme_repo_layout_names_only_paths_that_exist() -> None:
+    """The Repo Layout block is a directory listing, so every line is a checkable claim.
+
+    `config/hadoop/` outlived the directory it named: Phase 4 deleted it and the listing kept
+    describing it. Keyword sweeps for "hdfs" and "hive" never caught it, because the line says
+    "Hadoop" -- which is the argument for checking the filesystem instead of grepping for a word.
+    """
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+
+    block = re.search(r"## Repo Layout\s*```text\n(.*?)```", readme, re.DOTALL)
+    assert block, "README no longer has a fenced Repo Layout block"
+
+    missing = []
+    for line in block.group(1).splitlines():
+        path = line.split()[0] if line.split() else ""
+        # Only directory entries are asserted; prose and blank lines are skipped.
+        if path.endswith("/") and not (REPO_ROOT / path).is_dir():
+            missing.append(path)
+
+    assert not missing, f"README Repo Layout names paths that do not exist: {missing}"
