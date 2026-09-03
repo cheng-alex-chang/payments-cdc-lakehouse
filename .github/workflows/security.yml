@@ -1,0 +1,126 @@
+# Supply-chain and code scanning. Previously there was none of this at all: no SAST,
+# no image scanning, no dependency audit, no secret scanning.
+#
+# Split from ci.yml because it runs on a schedule as well as on changes. A dependency
+# that is clean today can be a published CVE next week without a single commit, so a
+# scan that only runs on push would go stale while looking green.
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, so newly-published advisories surface without waiting for a commit.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  codeql:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: python
+          queries: security-extended
+
+      - uses: github/codeql-action/analyze@v3
+
+  dependencies:
+    # pip-audit over the three pinned requirement files. They are pinned exactly, which
+    # is what makes this meaningful -- a floating range would report whatever resolved
+    # today rather than what actually ships.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install pip-audit==2.9.0
+
+      - name: Audit pinned dependencies
+        run: |
+          status=0
+          for file in requirements-ci.txt requirements-api.txt requirements-snowflake.txt; do
+            echo "::group::pip-audit ${file}"
+            pip-audit --requirement "$file" --strict --progress-spinner off || status=1
+            echo "::endgroup::"
+          done
+          exit "$status"
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # gitleaks needs history to scan commits, not just the working tree.
+          fetch-depth: 0
+
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  images:
+    # Trivy against the images as built here. Scanning the Dockerfile alone would miss
+    # vulnerabilities in the base image and in transitively installed OS packages, which
+    # is where most findings actually live.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: payments-api
+            dockerfile: config/api/Dockerfile
+            context: .
+          - image: data-pipeline-airflow
+            dockerfile: config/airflow/Dockerfile
+            context: .
+          - image: trino-exporter
+            dockerfile: config/trino-exporter/Dockerfile
+            context: config/trino-exporter
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build for scanning
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: false
+          load: true
+          tags: scan/${{ matrix.image }}:${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+
+      - uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: scan/${{ matrix.image }}:${{ github.sha }}
+          format: sarif
+          output: trivy-${{ matrix.image }}.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - uses: github/codeql-action/upload-sarif@v3
+        if: ${{ !cancelled() }}
+        with:
+          sarif_file: trivy-${{ matrix.image }}.sarif
+          category: trivy-${{ matrix.image }}

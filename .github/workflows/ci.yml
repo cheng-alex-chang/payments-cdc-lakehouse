@@ -380,3 +380,68 @@ jobs:
         run: |
           terraform -chdir=infra/terraform/snowflake init -backend=false
           terraform -chdir=infra/terraform/snowflake validate
+
+  # The single check branch protection should require.
+  #
+  # Requiring the individual jobs would mean editing the protection rules every time the
+  # graph changes, and would have to encode which jobs are allowed to skip. Both live
+  # here instead, in code, reviewed like anything else.
+  #
+  # This is not merely "did everything pass": it distinguishes an intentional skip from
+  # an accidental one. digest-manifest and k8s-acceptance skip on fork PRs because a
+  # fork's token cannot publish images; bundle-authenticated skips off main because its
+  # secrets are unavailable. Any OTHER skip means a job silently did not run, which is
+  # treated as a failure -- that is the failure mode an aggregator usually hides.
+  ci-complete:
+    if: ${{ always() }}
+    needs:
+      - lint
+      - coverage-gate
+      - build
+      - digest-manifest
+      - cdc-integration
+      - k8s-acceptance
+      - bundle-static
+      - bundle-authenticated
+      - terraform
+      - dbt
+      - snowflake-terraform
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assert every required job succeeded
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+          # Jobs whose skip is a deliberate part of the design, with the condition that
+          # justifies it. Anything not listed here must actually run.
+          ALLOWED_SKIPS: digest-manifest,k8s-acceptance,bundle-authenticated
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          results = json.loads(os.environ["RESULTS"])
+          allowed = set(os.environ["ALLOWED_SKIPS"].split(","))
+
+          problems = []
+          for job, outcome in sorted(results.items()):
+              result = outcome["result"]
+              if result == "success":
+                  print(f"  ok       {job}")
+              elif result == "skipped" and job in allowed:
+                  print(f"  skipped  {job} (expected on this trigger)")
+              elif result == "skipped":
+                  print(f"  SKIPPED  {job}")
+                  problems.append(f"{job} was skipped but is not an allowed skip")
+              else:
+                  print(f"  {result.upper():8s} {job}")
+                  problems.append(f"{job} finished as '{result}'")
+
+          if problems:
+              print("\nCI is not complete:", file=sys.stderr)
+              for problem in problems:
+                  print(f"  - {problem}", file=sys.stderr)
+              sys.exit(1)
+
+          print("\nAll required jobs accounted for.")
+          PY
