@@ -254,6 +254,10 @@ jobs:
         run: |
           mkdir -p .ci-cache/ivy
           cp .env.example .env
+          # Export the same values to the test process. The bootstrap scripts need S3
+          # credentials, and compose reads them from .env for the containers -- but pytest
+          # runs on the runner, outside that.
+          grep -E '^(POSTGRES_|MINIO_ROOT_)' .env >> "$GITHUB_ENV"
 
       # Services are named explicitly. A compose override merges into the base rather than
       # subtracting from it, so `up` with no arguments would start all eighteen services.

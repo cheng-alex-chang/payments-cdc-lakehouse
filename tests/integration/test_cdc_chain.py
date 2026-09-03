@@ -133,6 +133,39 @@ def cdc_chain():
     try:
         compose("up", "-d", "--wait", *SERVICES)
 
+        # The medallion cannot write until object storage and the catalog are bootstrapped.
+        # These are the DAG's first two tasks (init_object_store, init_catalog) and skipping
+        # them fails deep inside Spark with "A warehouse 'payments' does not exist" rather
+        # than anywhere near the actual cause.
+        #
+        # The two need DIFFERENT S3_ENDPOINT values, which is easy to get wrong:
+        #
+        #   init_object_store   CONNECTS to S3 to create the buckets, so from the runner it
+        #                       needs the published port -- compose maps MinIO to 9002, not 9000.
+        #   init_iceberg_catalog RECORDS the endpoint in the warehouse's storage profile for
+        #                       Lakekeeper and Spark to use later. Both are in-network, so it
+        #                       must store the service name. Passing localhost here would
+        #                       register a warehouse no in-cluster engine can reach.
+        s3_credentials = {
+            "S3_ACCESS_KEY": os.environ.get("MINIO_ROOT_USER", "payments"),
+            "S3_SECRET_KEY": os.environ.get("MINIO_ROOT_PASSWORD", "changeme"),
+        }
+
+        subprocess.run(
+            ["python", "scripts/init_object_store.py"],
+            cwd=REPO_ROOT, check=True, timeout=180, capture_output=True, text=True,
+            env={**os.environ, **s3_credentials, "S3_ENDPOINT": "http://localhost:9002"},
+        )
+        subprocess.run(
+            ["python", "scripts/init_iceberg_catalog.py"],
+            cwd=REPO_ROOT, check=True, timeout=180, capture_output=True, text=True,
+            env={
+                **os.environ, **s3_credentials,
+                "ICEBERG_REST_URL": "http://localhost:8181",
+                "S3_ENDPOINT": "http://minio:9000",
+            },
+        )
+
         # register_connector.sh posts to localhost:8083, which docker-compose.yml already
         # publishes. It :?-guards both credentials, so they must be exported.
         env = {
