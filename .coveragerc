@@ -8,4 +8,3 @@ source =
 [report]
 omit =
     */__init__.py
-    scripts/spark_submit_stub.sh

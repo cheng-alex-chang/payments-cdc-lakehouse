@@ -13,7 +13,11 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-KUBECONFIG_PATH="${ROOT_DIR}/.kind/kubeconfig"
+# scripts/k8s_up.sh writes the kubeconfig here, so a local run needs no setup. CI creates
+# the cluster with helm/kind-action, which writes to the default ~/.kube/config instead --
+# honouring an already-exported KUBECONFIG lets both use this script unmodified rather than
+# CI needing its own readiness check.
+KUBECONFIG_PATH="${KUBECONFIG:-${ROOT_DIR}/.kind/kubeconfig}"
 NAMESPACE=data-pipeline
 
 # Cold starts pull images and wait on dependency probes; override for a slower machine.
@@ -28,6 +32,12 @@ for command in kubectl; do
     exit 1
   fi
 done
+
+if [ ! -f "${KUBECONFIG_PATH}" ]; then
+  echo "No kubeconfig at ${KUBECONFIG_PATH}." >&2
+  echo "Run scripts/k8s_up.sh first, or export KUBECONFIG to point at your cluster." >&2
+  exit 1
+fi
 
 KUBECTL=(kubectl --kubeconfig "${KUBECONFIG_PATH}")
 

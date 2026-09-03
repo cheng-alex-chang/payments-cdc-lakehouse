@@ -3,7 +3,7 @@
 # the unit tests import it lazily / via importorskip, and CI has no Snowflake creds, so
 # installing it there would just slow CI without running anything. Install in the cloud
 # session: pip install -r requirements-snowflake.txt
-snowflake-connector-python==4.6.0
+snowflake-connector-python==4.7.2
 dbt-snowflake==1.11.6
 # Python 3.14 only: dbt-adapters pins mashumaro<3.18, which cannot serialize Optional[]
 # fields on 3.14. Pinning mashumaro>=3.22 HERE would make this file ResolutionImpossible,

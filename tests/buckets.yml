@@ -1,0 +1,75 @@
+# Single source of truth for how the fast test suite is split across CI jobs.
+#
+# Read by two consumers, which is the point: .github/workflows/ci.yml builds its job
+# matrix from this file, and tests/test_bucket_inventory.py asserts the union of every
+# bucket exactly equals pytest's collection. A new test file that nobody assigns fails
+# the inventory test rather than silently never running in CI.
+#
+# coverage_sources is shared by every bucket rather than narrowed per bucket, and that is
+# deliberate. Measured both ways: narrow sources give a combined 83%, the full list gives
+# 87% -- the same number the single pre-split job produced. The difference is real
+# coverage being discarded, e.g. test_pipeline_runtime.py genuinely exercises scripts/,
+# but a `pipeline` bucket measuring only config/spark/jobs would not record it.
+# Splitting the suite is meant to attribute failures, not to quietly harden the gate by
+# four points.
+#
+# The per-bucket runs enforce no threshold at all. Fragments are combined afterwards and
+# the 80% gate is applied once, project-wide.
+
+coverage_sources:
+  - airflow/dags
+  - api/src
+  - config/spark/jobs
+  - databricks/src/common.py
+  - scripts
+  - snowflake_etl/src
+
+buckets:
+  api:
+    paths:
+      - tests/test_api_app.py
+      - tests/test_api_cache.py
+      - tests/test_api_models.py
+      - tests/test_api_queries.py
+      - tests/test_api_trino_client.py
+
+  spark:
+    paths:
+      - tests/test_spark_jobs.py
+      - tests/test_transforms.py
+
+  etl:
+    paths:
+      - tests/test_extract_fx_rates.py
+      - tests/test_extract_payments.py
+      - tests/test_stage_to_s3.py
+      - tests/test_load_to_snowflake.py
+      - tests/test_scale_benchmark.py
+
+  airflow:
+    paths:
+      - tests/test_alerts.py
+      - tests/test_snowflake_dag.py
+
+  # test_pipeline_runtime.py spans Spark jobs *and* Airflow DAGs by design. It keeps its
+  # own bucket rather than being split: carving it up would mean editing tests to suit the
+  # pipeline, which is backwards.
+  pipeline:
+    paths:
+      - tests/test_pipeline_runtime.py
+
+  platform:
+    paths:
+      - tests/test_acceptance_checks.py
+      - tests/test_bucket_inventory.py
+      - tests/test_compose_manifest.py
+      - tests/test_databricks_helpers.py
+      - tests/test_dbt_project.py
+      - tests/test_bench_api.py
+      - tests/test_init_iceberg_catalog.py
+      - tests/test_init_object_store.py
+      - tests/test_maintain_iceberg.py
+      - tests/test_trino_http.py
+      - tests/test_validate_databricks_bundle.py
+      - tests/test_validate_k8s_manifests.py
+      - tests/test_validate_schema.py

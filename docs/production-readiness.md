@@ -23,10 +23,13 @@ each is stated precisely enough that you can check it against the code right now
   every payment aggregate. Production would put it behind a gateway or require a token, and add
   per-caller rate limiting.
 
-- **AWS credentials come from environment variables.** The S3 client reads `AWS_*`; production
-  should use IAM roles — instance profile, IRSA, or `AssumeRole` — rather than long-lived access
-  keys. The streaming half already does the equivalent right: its DAG authenticates through an
-  Airflow Connection, and Kubernetes uses real `Secret` objects.
+- **AWS credentials come from environment variables at runtime.** The S3 client reads `AWS_*`;
+  production should use IAM roles — instance profile, IRSA, or `AssumeRole` — rather than
+  long-lived access keys. The streaming half already does the equivalent right: its DAG
+  authenticates through an Airflow Connection, and Kubernetes uses real `Secret` objects. Note the
+  boundary: the *deployment* path is federated (`release-cloud.yml` assumes an IAM role through
+  GitHub OIDC, so no AWS secret is stored), but that says nothing about how the running pipeline
+  authenticates, which is what this bullet is about.
 
 ## Data
 
