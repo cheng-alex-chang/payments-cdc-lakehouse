@@ -12,3 +12,20 @@ targets:
     default: true
     workspace:
       host: https://dbc-9e931fd5-a7b1.cloud.databricks.com
+
+  # Deployed only by .github/workflows/release-cloud.yml, after a required reviewer
+  # approves the `prod` GitHub Environment.
+  #
+  # mode: production is not cosmetic -- it drops the per-user resource prefixing and
+  # `development` pause that mode: development applies, so the job schedules are real.
+  #
+  # The host is deliberately not hardcoded. The CLI reads DATABRICKS_HOST from the
+  # environment, supplied by the workload-identity federation configured for the prod
+  # environment. That keeps the production workspace out of the repository and lets this
+  # target point at a separate workspace without a code change.
+  #
+  # root_path is left to the default, which for mode: production is already
+  # /Shared/.bundle/${bundle.name}/${bundle.target} -- restating it would only be another
+  # thing to keep in step.
+  prod:
+    mode: production
