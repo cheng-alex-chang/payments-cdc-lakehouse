@@ -41,21 +41,11 @@ jobs:
 
       - run: pip install -r requirements-ci.txt
 
-      # The Spark Jobs resolve --packages into a pod-local Ivy dir. kind-config-ci.yaml
-      # maps this host directory into the node and the overlay hostPath-mounts it into
-      # the three Jobs, so ~100MB of Maven traffic happens on a cache miss, not per Job.
-      - uses: actions/cache@v4
-        with:
-          path: .ci-cache/ivy
-          key: ivy-k8s-${{ hashFiles('airflow/dags/spark_jobs.py', 'k8s/base/spark.yaml') }}
-          restore-keys: ivy-k8s-
-
-      - name: Prepare host directories
-        run: mkdir -p .ci-cache/ivy
-
+      # No Ivy cache here, deliberately -- see the note in k8s/overlays/ci/kustomization.yaml.
+      # The Spark Jobs re-resolve their packages each run, which is slow but correct.
       - uses: helm/kind-action@v1
         with:
-          config: k8s/kind-config-ci.yaml
+          config: k8s/kind-config.yaml
           cluster_name: data-pipeline
 
       - name: Generate throwaway cluster credentials

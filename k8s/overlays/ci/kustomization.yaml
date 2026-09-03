@@ -43,19 +43,25 @@ secretGenerator:
     envs:
       - secrets.env
 
-# Spark Jobs resolve Iceberg/Kafka jars with --packages into spark.jars.ivy=/tmp/.ivy2,
-# which is pod-local. Three Jobs would each re-fetch ~100MB from Maven Central, inside
-# the cluster where actions/cache cannot reach. The patch points that path at a hostPath
-# the kind node maps to the runner's cached directory -- see k8s/kind-config-ci.yaml.
+# On caching Spark's Ivy directory here: don't, at least not this way. The three Spark
+# Jobs each re-resolve ~100MB from Maven Central because spark.jars.ivy=/tmp/.ivy2 is
+# pod-local, and mounting a hostPath there looks like the obvious fix. It is not: kubelet
+# creates a DirectoryOrCreate hostPath as root:root 0755, while the Spark Job runs as the
+# image's default UID 185, so Ivy fails with
+#
+#   FileNotFoundException: /tmp/.ivy2/cache/resolved-...xml (No such file or directory)
+#
+# and the Job crash-loops until the wait times out. Compose gets away with a bind mount
+# only because its spark service sets `user: "0:0"`.
+#
+# Making it work needs either a root initContainer to chown the mount or runAsUser: 0 on
+# the Jobs -- complexity in the acceptance path to save a few minutes. The real fix is
+# baking the jars into a Spark image, which removes the download from both runtimes; see
+# docs/ci-cd.md. Until then the Jobs pay the download, which is slow but correct.
 patches:
   - path: imagepullsecret-patch.yaml
     target:
       kind: (Deployment|StatefulSet|Job)
-
-  - path: ivy-cache-patch.yaml
-    target:
-      kind: Job
-      labelSelector: app.kubernetes.io/component=processing
 
 # Image digests are NOT set here. A committed overlay cannot contain a digest that does
 # not exist yet, so the deploy job runs `kustomize edit set image` against the manifest
