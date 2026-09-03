@@ -41,8 +41,7 @@ jobs:
 
       - run: pip install -r requirements-ci.txt
 
-      # No Ivy cache here, deliberately -- see the note in k8s/overlays/ci/kustomization.yaml.
-      # The Spark Jobs re-resolve their packages each run, which is slow but correct.
+      # No Ivy cache step: the payments-spark image ships the resolved jars.
       - uses: helm/kind-action@v1
         with:
           config: k8s/kind-config.yaml
@@ -99,6 +98,7 @@ jobs:
               "payments-api": "local/payments-api",
               "data-pipeline-airflow": "local/data-pipeline-airflow",
               "trino-exporter": "local/trino-exporter",
+              "payments-spark": "local/payments-spark",
           }
           missing = sorted(set(local) - set(manifest))
           if missing:

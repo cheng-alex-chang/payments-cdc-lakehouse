@@ -92,6 +92,9 @@ jobs:
           - image: trino-exporter
             dockerfile: config/trino-exporter/Dockerfile
             context: config/trino-exporter
+          - image: payments-spark
+            dockerfile: config/spark/Dockerfile
+            context: .
     runs-on: ubuntu-latest
     permissions:
       contents: read

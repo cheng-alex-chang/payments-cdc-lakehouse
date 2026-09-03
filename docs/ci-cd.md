@@ -11,7 +11,7 @@ otherwise:
 
 | Track | Workloads | Artifact | Target |
 |---|---|---|---|
-| **Lakehouse** | Spark, API, Airflow, Kafka/Debezium, Iceberg, Trino | Docker images | Ephemeral kind |
+| **Lakehouse** | Spark, API, Airflow, Kafka/Debezium, Iceberg, Trino | Docker images (4) | Ephemeral kind |
 | **Cloud analytics** | DLT pipeline, Snowflake, dbt | A repo revision | Databricks + Snowflake |
 
 They implement related logic but run different workloads and ship different artifacts.
@@ -77,14 +77,16 @@ reproducible locally.
 exercises the orchestration contract the manifests already define instead of inventing a
 CI-only execution path.
 
-**Spark's Ivy cache is not shared in the kind acceptance cluster.** Mounting a hostPath at
-`spark.jars.ivy` looks like the obvious way to avoid three ~100MB Maven resolutions, and it
-fails: kubelet creates a `DirectoryOrCreate` hostPath as `root:root 0755` while the Spark
-Job runs as the image's default UID 185, so Ivy dies with `FileNotFoundException:
-/tmp/.ivy2/cache/resolved-...xml` and the Job crash-loops. Compose gets away with a bind
-mount only because its `spark` service sets `user: "0:0"`. The real fix is baking the jars
-into a Spark image, which removes the download from both runtimes; until then the Jobs pay
-it.
+**Spark's dependencies are baked into an image, not cached at runtime.** The three Spark
+Jobs submit with `--packages`, which without help re-resolves ~100MB from Maven on every
+run, inside the cluster where `actions/cache` cannot reach. Mounting a hostPath at
+`spark.jars.ivy` looks like the fix and is not: kubelet creates a `DirectoryOrCreate`
+hostPath as `root:root 0755` while the Job runs as the image's UID 185, so Ivy dies with
+`FileNotFoundException: /tmp/.ivy2/cache/resolved-...xml` and the Job crash-loops. Compose
+only gets away with it because its `spark` service sets `user: "0:0"`. So
+`config/spark/Dockerfile` resolves the tree at build time into the path the jobs already
+use, owned by the runtime user. The submit arguments are unchanged — `--packages` still
+resolves the same tree, it just finds every artifact locally.
 
 **Resources are not trimmed for CI.** Always-on workloads request 4.6Gi and the Jobs run
 one at a time, so peak is ~5.6Gi on a 16GB runner — not the 8.1Gi that summing every

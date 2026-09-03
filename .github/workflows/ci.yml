@@ -150,8 +150,9 @@ jobs:
             echo "Fork pull request: images are built but not published, and k8s acceptance is skipped."
           fi
 
-  # The three images this repo actually builds. Spark is deliberately absent: it runs on
-  # upstream spark:3.5.8-python3 with jobs submitted as loose .py files.
+  # The four images this repo builds. payments-spark is upstream spark:3.5.8-python3 with
+  # the medallion's --packages tree pre-resolved, so the Spark Jobs stop re-downloading
+  # ~100MB from Maven on every acceptance run -- see config/spark/Dockerfile.
   build:
     needs: [coverage-gate, trust]
     # A called workflow cannot hold more permission than its caller grants, and this
@@ -173,6 +174,9 @@ jobs:
           - image: trino-exporter
             dockerfile: config/trino-exporter/Dockerfile
             context: config/trino-exporter
+          - image: payments-spark
+            dockerfile: config/spark/Dockerfile
+            context: .
     uses: ./.github/workflows/_docker-build.yml
     with:
       image: ${{ matrix.image }}
@@ -199,8 +203,8 @@ jobs:
           import json
 
           files = sorted(glob.glob("digest-*.json"))
-          if len(files) != 3:
-              raise SystemExit(f"expected 3 digest files, found {len(files)}: {files}")
+          if len(files) != 4:
+              raise SystemExit(f"expected 4 digest files, found {len(files)}: {files}")
 
           manifest = {}
           for path in files:
@@ -241,18 +245,10 @@ jobs:
 
       - run: pip install -r requirements-ci.txt
 
-      # Spark resolves its Iceberg/Kafka jars with --packages into a container-local Ivy
-      # directory that dies with the container. docker-compose.ci.yml bind-mounts it here
-      # so the ~100MB Maven fetch happens on a cache miss, not on every run.
-      - uses: actions/cache@v6
-        with:
-          path: .ci-cache/ivy
-          key: ivy-${{ hashFiles('scripts/run_local_job.py', 'airflow/dags/spark_jobs.py') }}
-          restore-keys: ivy-
-
       - name: Seed the compose environment
+        # No Ivy cache step: the payments-spark image ships the resolved jars, so there is
+        # nothing to restore, and a bind mount over /tmp/.ivy2 would shadow them.
         run: |
-          mkdir -p .ci-cache/ivy
           cp .env.example .env
           # Export the same values to the test process. The bootstrap scripts need S3
           # credentials, and compose reads them from .env for the containers -- but pytest
@@ -262,14 +258,10 @@ jobs:
       # Services are named explicitly. A compose override merges into the base rather than
       # subtracting from it, so `up` with no arguments would start all eighteen services.
       - name: Run the CDC chain end to end
-        env:
-          COMPOSE_FILE: docker-compose.yml:docker-compose.ci.yml
         run: pytest -m integration_cdc tests/integration/test_cdc_chain.py -v
 
       - name: Collect container logs on failure
         if: failure()
-        env:
-          COMPOSE_FILE: docker-compose.yml:docker-compose.ci.yml
         run: docker compose logs --tail 200 > compose-logs.txt || true
 
       - uses: actions/upload-artifact@v7

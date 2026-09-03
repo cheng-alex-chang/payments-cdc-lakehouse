@@ -22,5 +22,3 @@ snowflake_etl/dbt/.user.yml
 # Local .env backups - contain real passwords, never commit.
 .env.bak*
 
-# CI-only Spark Ivy cache (see docker-compose.ci.yml)
-.ci-cache/
