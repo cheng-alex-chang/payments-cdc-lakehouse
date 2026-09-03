@@ -22,9 +22,9 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
@@ -41,9 +41,9 @@ jobs:
     outputs:
       matrix: ${{ steps.build.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
@@ -88,9 +88,9 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
@@ -98,7 +98,7 @@ jobs:
 
       - run: pip install -r requirements-ci.txt
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: coverage-*
           # Without merge-multiple each artifact lands in its own subdirectory and
@@ -187,7 +187,7 @@ jobs:
     if: needs.trust.outputs.publish == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: digest-*
           merge-multiple: true
@@ -215,7 +215,7 @@ jobs:
           print(json.dumps(manifest, indent=2, sort_keys=True))
           PY
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: image-manifest
           path: images.json
@@ -231,9 +231,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
@@ -244,7 +244,7 @@ jobs:
       # Spark resolves its Iceberg/Kafka jars with --packages into a container-local Ivy
       # directory that dies with the container. docker-compose.ci.yml bind-mounts it here
       # so the ~100MB Maven fetch happens on a cache miss, not on every run.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: .ci-cache/ivy
           key: ivy-${{ hashFiles('scripts/run_local_job.py', 'airflow/dags/spark_jobs.py') }}
@@ -272,7 +272,7 @@ jobs:
           COMPOSE_FILE: docker-compose.yml:docker-compose.ci.yml
         run: docker compose logs --tail 200 > compose-logs.txt || true
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: cdc-compose-logs
@@ -297,9 +297,9 @@ jobs:
     # cannot run on every trigger.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
@@ -323,9 +323,9 @@ jobs:
       # the bundle file supplies, which fails in a way that looks nothing like the cause.
       DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: databricks/setup-cli@v1.9.0
+      - uses: databricks/setup-cli@v1.14.1
 
       - name: Require credentials
         run: |
@@ -346,9 +346,9 @@ jobs:
     # the job is a real check out-of-the-box.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v4
 
       - name: Terraform fmt
         run: terraform -chdir=infra/terraform/databricks fmt -check -recursive
@@ -364,9 +364,9 @@ jobs:
     # defaults -- so this is a real check that needs no Snowflake credentials.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
@@ -380,9 +380,9 @@ jobs:
     # Snowflake/AWS credentials, so it is a real check out-of-the-box.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v4
 
       - name: Terraform fmt
         run: terraform -chdir=infra/terraform/snowflake fmt -check -recursive
