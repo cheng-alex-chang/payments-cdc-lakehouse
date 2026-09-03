@@ -1,0 +1,18 @@
+# CI-only overlay for the CDC integration test.
+#
+# Purpose: persist Spark's Ivy cache on the host so actions/cache can carry it between
+# runs. run_local_job.py submits with `--conf spark.jars.ivy=/tmp/.ivy2`, which lives
+# inside a container that is recreated every run -- so without this the Iceberg runtime,
+# iceberg-aws-bundle, hadoop-aws and spark-sql-kafka jars are re-fetched from Maven
+# Central on every CI execution. That is minutes on the critical path and a genuine
+# flake source when Maven is slow.
+#
+# This overlay only ADDS to the base file. Compose merges overrides rather than
+# subtracting, so it cannot be used to select a subset of services -- `up` with no
+# arguments would still start all eighteen. The service list is passed explicitly on the
+# command line instead; see tests/integration/test_cdc_chain.py and ci.yml.
+services:
+  spark:
+    volumes:
+      - .:/opt/project
+      - ./.ci-cache/ivy:/tmp/.ivy2

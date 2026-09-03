@@ -464,6 +464,56 @@ def test_validate_connector_rejects_failed_tasks(monkeypatch: pytest.MonkeyPatch
         validate_connector.main()
 
 
+def test_validate_connector_defaults_to_the_in_network_name() -> None:
+    """The Airflow DAG runs this task inside the Airflow container.
+
+    Only `kafka-connect:8083` resolves there, so an unset CONNECT_URL must keep
+    working -- parameterizing without a default would break the pipeline.
+    """
+    from scripts import validate_connector
+
+    assert validate_connector.DEFAULT_CONNECT_URL == "http://kafka-connect:8083"
+
+
+def test_validate_connector_honours_connect_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CI drives Compose from the runner, where only localhost:8083 is reachable."""
+    from scripts import validate_connector
+
+    monkeypatch.setenv("CONNECT_URL", "http://localhost:8083")
+    assert validate_connector.connect_url() == "http://localhost:8083"
+
+
+def test_validate_connector_strips_a_trailing_slash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Otherwise the request URL gains a double slash before /connectors."""
+    from scripts import validate_connector
+
+    monkeypatch.setenv("CONNECT_URL", "http://localhost:8083/")
+    assert validate_connector.connect_url() == "http://localhost:8083"
+
+
+def test_validate_connector_requests_the_configured_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The override has to reach the actual request, not just the helper."""
+    from scripts import validate_connector
+
+    requested: list[str] = []
+    payload = {"connector": {"state": "RUNNING"}, "tasks": [{"state": "RUNNING"}]}
+
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, exc_type, exc, tb): return None
+        def read(self) -> bytes: return json.dumps(payload).encode()
+
+    def fake_urlopen(url, *args, **kwargs):
+        requested.append(url)
+        return Response()
+
+    monkeypatch.setenv("CONNECT_URL", "http://localhost:8083")
+    monkeypatch.setattr(validate_connector, "urlopen", fake_urlopen)
+    validate_connector.main()
+
+    assert requested == ["http://localhost:8083/connectors/postgres-payments-cdc/status"]
+
+
 # ---------------------------------------------------------------------------
 # bronze job
 # ---------------------------------------------------------------------------

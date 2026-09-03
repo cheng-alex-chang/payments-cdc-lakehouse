@@ -1,0 +1,32 @@
+# Every dependency in this repo is pinned exactly -- requirements files, action versions,
+# base images. That is the right default for reproducibility, but pins do not update
+# themselves, and an unattended pin is how a project ends up years behind. Dependabot is
+# what makes exact pinning sustainable rather than a slow drift into staleness.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # One PR for the test/lint toolchain rather than five. These move together and are
+      # verified by the same suite, so reviewing them separately is noise.
+      dev-tooling:
+        patterns: ["pytest*", "ruff", "moto", "httpx"]
+
+  - package-ecosystem: docker
+    directories:
+      - /config/api
+      - /config/airflow
+      - /config/trino-exporter
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]

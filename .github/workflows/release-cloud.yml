@@ -1,0 +1,208 @@
+# Cloud analytics release: Databricks, Snowflake, dbt.
+#
+# Separate from ci.yml on purpose. This project has two deployment tracks that are not a
+# dev -> prod chain: the lakehouse track (Spark/API/Airflow/Iceberg on Kubernetes) and
+# this one. They implement related logic but run different workloads and ship different
+# artifacts, so kind acceptance does not promote into Databricks. Modelling them as one
+# chain would make "promote the same artifact" a lie, since this track has no image.
+name: Cloud release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Never let two releases race for the same Snowflake schema or bundle root.
+  group: cloud-release
+  cancel-in-progress: false
+
+jobs:
+  # Unattended rehearsal. Everything that can fail without touching production runs here,
+  # BEFORE anyone is asked to approve.
+  rehearse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      schema: ${{ steps.schema.outputs.name }}
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - uses: databricks/setup-cli@v1.9.0
+
+      # OIDC rather than long-lived keys. The role trusts this repository's OIDC subject,
+      # so no AWS secret exists to leak or rotate.
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_TERRAFORM_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Validate the Databricks bundle
+        working-directory: databricks
+        run: databricks bundle validate -t prod
+
+      # plan, never apply, before approval. The output goes to the job summary so the
+      # reviewer approving the environment can see what they are approving.
+      - name: Terraform plan
+        run: |
+          for stack in databricks snowflake; do
+            echo "::group::terraform plan -- ${stack}"
+            terraform -chdir="infra/terraform/${stack}" init -input=false
+            terraform -chdir="infra/terraform/${stack}" plan -input=false -no-color \
+              | tee "/tmp/plan-${stack}.txt"
+            echo "::endgroup::"
+          done
+          {
+            for stack in databricks snowflake; do
+              echo "### terraform plan -- ${stack}"
+              echo '```'
+              tail -60 "/tmp/plan-${stack}.txt"
+              echo '```'
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
+
+      - id: schema
+        run: echo "name=ANALYTICS_CI_${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      - run: pip install -r requirements-snowflake.txt
+
+      # The rehearsal this project could not previously do. profiles.yml already reads
+      # SNOWFLAKE_SCHEMA (defaulting to ANALYTICS) and dbt_project.yml does not override
+      # it, so pointing a full build at a throwaway schema needs no dbt redesign. This is
+      # also the first time the 6 schema tests and 4 singular tests run in CI at all.
+      - name: dbt build into a disposable schema
+        env:
+          DBT_TARGET: trial
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
+          SNOWFLAKE_SCHEMA: ${{ steps.schema.outputs.name }}
+        run: |
+          dbt build --project-dir snowflake_etl/dbt --profiles-dir snowflake_etl/dbt
+
+      # if: always() matters more than it looks. Without it a failing dbt test -- exactly
+      # the case this rehearsal exists to catch -- would leak a schema on every red run.
+      - name: Drop the disposable schema
+        if: always()
+        env:
+          DBT_TARGET: trial
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
+          SCHEMA: ${{ steps.schema.outputs.name }}
+        run: |
+          python - <<'PY'
+          import os
+          import snowflake.connector
+
+          schema = os.environ["SCHEMA"]
+          with snowflake.connector.connect(
+              account=os.environ["SNOWFLAKE_ACCOUNT"],
+              user=os.environ["SNOWFLAKE_USER"],
+              password=os.environ["SNOWFLAKE_PASSWORD"],
+              role=os.environ.get("SNOWFLAKE_ROLE", "PAYMENTS_ETL_ROLE"),
+              database=os.environ.get("SNOWFLAKE_DATABASE", "PAYMENTS"),
+              warehouse=os.environ.get("SNOWFLAKE_WAREHOUSE", "PAYMENTS_WH"),
+          ) as connection:
+              connection.cursor().execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+              print(f"dropped {schema}")
+          PY
+        continue-on-error: true
+
+  # The approval gate. `environment:` is what pauses the run -- required reviewers are a
+  # repository setting, not YAML, so this job blocks until a human approves.
+  release:
+    needs: rehearse
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment:
+      name: prod
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - uses: databricks/setup-cli@v1.9.0
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_TERRAFORM_ROLE_ARN }}
+          aws-region: us-east-1
+
+      # Infrastructure before the workloads that depend on it: the Unity Catalog schema
+      # and volume must exist before a bundle deploys into them, and the Snowflake
+      # warehouse/role/stage before dbt writes through them.
+      - name: Apply Databricks governance
+        run: |
+          terraform -chdir=infra/terraform/databricks init -input=false
+          terraform -chdir=infra/terraform/databricks apply -input=false -auto-approve
+
+      - name: Deploy the Databricks bundle
+        working-directory: databricks
+        run: databricks bundle deploy -t prod
+
+      - name: Apply Snowflake governance
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
+        run: |
+          terraform -chdir=infra/terraform/snowflake init -input=false
+          terraform -chdir=infra/terraform/snowflake apply -input=false -auto-approve
+
+      - run: pip install -r requirements-snowflake.txt
+
+      - name: dbt build into ANALYTICS
+        env:
+          DBT_TARGET: trial
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
+          SNOWFLAKE_SCHEMA: ANALYTICS
+        run: dbt build --project-dir snowflake_etl/dbt --profiles-dir snowflake_etl/dbt
+
+      - name: Record what shipped
+        if: always()
+        run: |
+          {
+            echo '### Cloud release'
+            echo "- commit: \`${GITHUB_SHA}\`"
+            echo "- rehearsed in: \`${{ needs.rehearse.outputs.schema }}\`"
+            echo "- Databricks bundle target: \`prod\`"
+            echo ""
+            echo 'Rollback is not uniform across this track:'
+            echo '- Databricks: redeploy the previous known-good bundle revision.'
+            echo '- dbt: redeploy the previous model revision **where schema-compatible**.'
+            echo '- Terraform/Snowflake: revert or forward-fix. There is no automatic'
+            echo '  rollback for destructive DDL, and pretending otherwise would be worse'
+            echo '  than saying so.'
+          } >> "$GITHUB_STEP_SUMMARY"

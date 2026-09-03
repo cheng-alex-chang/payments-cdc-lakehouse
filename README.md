@@ -236,12 +236,25 @@ is idempotent either way — `CREATE TABLE IF NOT EXISTS` plus `ON CONFLICT DO N
 
 ## Run tests
 
-Runtime-independent — the suite needs no running services and no credentials.
+The default suite is runtime-independent — no running services, no credentials, about a
+second.
 
 ```bash
 source .venv/bin/activate
 pytest --cov --cov-report=term-missing
 ```
+
+The end-to-end CDC test is excluded from that run and selected explicitly. It starts nine
+containers and drives a real payment from Postgres through Debezium, Kafka and Spark into
+Iceberg:
+
+```bash
+pytest -m integration_cdc tests/integration/test_cdc_chain.py
+```
+
+CI runs the fast suite as six per-component jobs behind a single project-wide coverage
+gate. How the buckets are defined, and the rest of the pipeline, is in
+[docs/ci-cd.md](docs/ci-cd.md).
 
 ## Databricks (Lakeflow Declarative Pipeline)
 

@@ -1,0 +1,69 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Ephemeral acceptance overlay for CI. Proves the immutable GHCR artifacts deploy under
+# the project's real manifests and produce correct data, then the cluster is destroyed.
+# Not a persistent environment and not something that promotes into Databricks/Snowflake.
+#
+# Two deliberate non-changes, both from measuring rather than assuming:
+#
+# Resources are NOT trimmed. Always-on workloads request 4.6Gi; the five operational Jobs
+# ship suspended and CI activates them one at a time, so peak is ~5.6Gi on a 16GB runner.
+# The naive all-at-once sum of 8.1Gi never occurs.
+#
+# Observability is NOT dropped. scripts/k8s_verify.sh waits on grafana and prometheus by
+# name, and tests/test_validate_k8s_manifests.py asserts that list matches the manifests.
+# Removing them here would mean forking the verification script, trading a real readiness
+# check for a bit of headroom that measurement says is not needed.
+
+resources:
+  - ../../base
+
+generatorOptions:
+  disableNameSuffixHash: true
+
+labels:
+  - pairs:
+      app.kubernetes.io/managed-by: kustomize
+
+# Mirrors k8s/overlays/local. CI generates secrets.env with throwaway values at job time;
+# the cluster is destroyed minutes later and never leaves the runner.
+secretGenerator:
+  - name: platform-secrets
+    namespace: data-pipeline
+    literals:
+      - POSTGRES_DB=payments
+      - POSTGRES_USER=dataeng
+      - CATALOG_DB=catalog
+      - CATALOG_USER=catalog
+      - AIRFLOW_DB=airflow
+      - AIRFLOW_USER=airflow
+      - AIRFLOW_ADMIN_USERNAME=admin
+      - MINIO_ROOT_USER=payments
+    envs:
+      - secrets.env
+
+# On caching Spark's Ivy directory here: don't, at least not this way. The three Spark
+# Jobs each re-resolve ~100MB from Maven Central because spark.jars.ivy=/tmp/.ivy2 is
+# pod-local, and mounting a hostPath there looks like the obvious fix. It is not: kubelet
+# creates a DirectoryOrCreate hostPath as root:root 0755, while the Spark Job runs as the
+# image's default UID 185, so Ivy fails with
+#
+#   FileNotFoundException: /tmp/.ivy2/cache/resolved-...xml (No such file or directory)
+#
+# and the Job crash-loops until the wait times out. Compose gets away with a bind mount
+# only because its spark service sets `user: "0:0"`.
+#
+# Making it work needs either a root initContainer to chown the mount or runAsUser: 0 on
+# the Jobs -- complexity in the acceptance path to save a few minutes. The real fix is
+# baking the jars into a Spark image, which removes the download from both runtimes; see
+# docs/ci-cd.md. Until then the Jobs pay the download, which is slow but correct.
+patches:
+  - path: imagepullsecret-patch.yaml
+    target:
+      kind: (Deployment|StatefulSet|Job)
+
+# Image digests are NOT set here. A committed overlay cannot contain a digest that does
+# not exist yet, so the deploy job runs `kustomize edit set image` against the manifest
+# produced by the build stage. See .github/workflows/_deploy-k8s.yml.
+images: []

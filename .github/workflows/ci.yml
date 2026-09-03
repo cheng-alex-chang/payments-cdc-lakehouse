@@ -6,6 +6,18 @@ on:
   pull_request:
     branches: [main]
 
+# Least privilege by default. Jobs that need more (packages: write for GHCR,
+# id-token: write for OIDC) opt in individually as those stages land.
+permissions:
+  contents: read
+
+# A PR that gets a second push should not keep spending runners on the first commit.
+# Note this does not deduplicate triggers: push is scoped to main and pull_request to
+# PRs targeting main, so a feature-branch commit already fires exactly once.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -22,7 +34,58 @@ jobs:
 
       - run: ruff check .
 
+  # The bucket list lives in tests/buckets.yml so the matrix and the inventory guard
+  # read the same source. tests/test_bucket_inventory.py fails if the two drift.
+  test-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install PyYAML==6.0.3
+
+      - id: build
+        name: Build the bucket matrix
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import yaml
+
+          with open("tests/buckets.yml", encoding="utf-8") as handle:
+              config = yaml.safe_load(handle)
+
+          # Every bucket measures the same sources -- see the note in buckets.yml.
+          cov = " ".join(f"--cov={source}" for source in config["coverage_sources"])
+          matrix = [
+              {"name": name, "paths": " ".join(bucket["paths"]), "cov": cov}
+              for name, bucket in sorted(config["buckets"].items())
+          ]
+          print(f"matrix={json.dumps(matrix)}")
+          PY
+
   test:
+    needs: test-matrix
+    strategy:
+      # One red bucket should not hide the state of the other five.
+      fail-fast: false
+      matrix:
+        bucket: ${{ fromJSON(needs.test-matrix.outputs.matrix) }}
+    uses: ./.github/workflows/_python-tests.yml
+    with:
+      bucket: ${{ matrix.bucket.name }}
+      paths: ${{ matrix.bucket.paths }}
+      cov: ${{ matrix.bucket.cov }}
+
+  # The one job branch protection should require. Splitting the suite splits its coverage
+  # data too; combining here keeps a single project-wide threshold instead of silently
+  # turning one 80% gate into six much harsher ones.
+  coverage-gate:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,33 +98,245 @@ jobs:
 
       - run: pip install -r requirements-ci.txt
 
-      # api/src is covered here without installing the Trino driver: trino_client imports it
-      # lazily inside connect_from_env, so every API test runs against a fake DBAPI connection.
-      - run: >-
-          pytest
-          --cov=config/spark/jobs
-          --cov=scripts
-          --cov=databricks/src/common.py
-          --cov=snowflake_etl/src
-          --cov=api/src
-          --cov-report=term-missing
-          --cov-fail-under=80
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-*
+          # Without merge-multiple each artifact lands in its own subdirectory and
+          # `coverage combine` finds nothing to combine.
+          merge-multiple: true
 
-  bundle:
-    # Validates the Databricks Asset Bundle. The validate step runs only when the
-    # DATABRICKS_HOST / DATABRICKS_TOKEN repo secrets are set, so the job stays
-    # green out-of-the-box and becomes a real check once you add credentials.
+      - name: Fail if no coverage data was collected
+        run: |
+          shopt -s nullglob dotglob
+          fragments=(.coverage.*)
+          if [ ${#fragments[@]} -eq 0 ]; then
+            echo "::error::No .coverage.* fragments were downloaded." >&2
+            echo "The gate must not pass on an empty data set." >&2
+            exit 1
+          fi
+          echo "Combining ${#fragments[@]} fragment(s): ${fragments[*]}"
+
+      - name: Combine and enforce the project threshold
+        run: |
+          coverage combine
+          coverage report --show-missing --fail-under=80
+
+      - name: Publish the combined report
+        if: ${{ !cancelled() }}
+        run: |
+          {
+            echo '### Combined coverage'
+            echo '```'
+            coverage report --show-missing || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Whether this run may publish to GHCR. A fork PR's GITHUB_TOKEN is read-only, so it
+  # gets no packages: write and cannot push. Computed once here so the trust decision is
+  # visible in one place rather than repeated in every downstream `if:`.
+  trust:
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.check.outputs.publish }}
+    steps:
+      - id: check
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ] \
+             || [ "${{ github.event.pull_request.head.repo.full_name }}" = "${{ github.repository }}" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "Trusted trigger: images will be published to GHCR."
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Fork pull request: images are built but not published, and k8s acceptance is skipped."
+          fi
+
+  # The three images this repo actually builds. Spark is deliberately absent: it runs on
+  # upstream spark:3.5.8-python3 with jobs submitted as loose .py files.
+  build:
+    needs: [coverage-gate, trust]
+    # A called workflow cannot hold more permission than its caller grants, and this
+    # workflow's default is contents: read. _docker-build.yml requests packages: write
+    # to publish to GHCR, so the calling job has to grant it here.
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: payments-api
+            dockerfile: config/api/Dockerfile
+            context: .
+          - image: data-pipeline-airflow
+            dockerfile: config/airflow/Dockerfile
+            context: .
+          - image: trino-exporter
+            dockerfile: config/trino-exporter/Dockerfile
+            context: config/trino-exporter
+    uses: ./.github/workflows/_docker-build.yml
+    with:
+      image: ${{ matrix.image }}
+      dockerfile: ${{ matrix.dockerfile }}
+      context: ${{ matrix.context }}
+      push: ${{ needs.trust.outputs.publish == 'true' }}
+
+  # Merges the per-image digest artifacts into one manifest that Phase 5 consumes to pin
+  # the CI overlay's images by digest.
+  digest-manifest:
+    needs: [build, trust]
+    if: needs.trust.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Merge digests
+        run: |
+          python3 - <<'PY'
+          import glob
+          import json
+
+          files = sorted(glob.glob("digest-*.json"))
+          if len(files) != 3:
+              raise SystemExit(f"expected 3 digest files, found {len(files)}: {files}")
+
+          manifest = {}
+          for path in files:
+              with open(path, encoding="utf-8") as handle:
+                  entry = json.load(handle)
+              if not entry["digest"].startswith("sha256:"):
+                  raise SystemExit(f"{path}: missing or malformed digest")
+              manifest[entry["image"]] = entry
+
+          with open("images.json", "w", encoding="utf-8") as handle:
+              json.dump(manifest, handle, indent=2, sort_keys=True)
+          print(json.dumps(manifest, indent=2, sort_keys=True))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-manifest
+          path: images.json
+          retention-days: 1
+          if-no-files-found: error
+
+  # Proves the CDC chain actually moves data, rather than inferring it from manifests.
+  # Runs in PARALLEL with build: none of the three images this repo builds take part in
+  # the chain, so making it wait on them would add minutes for nothing. It also runs on
+  # fork PRs for the same reason -- it needs no registry and no secrets.
+  cdc-integration:
+    needs: coverage-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+
+      - run: pip install -r requirements-ci.txt
+
+      # Spark resolves its Iceberg/Kafka jars with --packages into a container-local Ivy
+      # directory that dies with the container. docker-compose.ci.yml bind-mounts it here
+      # so the ~100MB Maven fetch happens on a cache miss, not on every run.
+      - uses: actions/cache@v4
+        with:
+          path: .ci-cache/ivy
+          key: ivy-${{ hashFiles('scripts/run_local_job.py', 'airflow/dags/spark_jobs.py') }}
+          restore-keys: ivy-
+
+      - name: Seed the compose environment
+        run: |
+          mkdir -p .ci-cache/ivy
+          cp .env.example .env
+          # Export the same values to the test process. The bootstrap scripts need S3
+          # credentials, and compose reads them from .env for the containers -- but pytest
+          # runs on the runner, outside that.
+          grep -E '^(POSTGRES_|MINIO_ROOT_)' .env >> "$GITHUB_ENV"
+
+      # Services are named explicitly. A compose override merges into the base rather than
+      # subtracting from it, so `up` with no arguments would start all eighteen services.
+      - name: Run the CDC chain end to end
+        env:
+          COMPOSE_FILE: docker-compose.yml:docker-compose.ci.yml
+        run: pytest -m integration_cdc tests/integration/test_cdc_chain.py -v
+
+      - name: Collect container logs on failure
+        if: failure()
+        env:
+          COMPOSE_FILE: docker-compose.yml:docker-compose.ci.yml
+        run: docker compose logs --tail 200 > compose-logs.txt || true
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: cdc-compose-logs
+          path: compose-logs.txt
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # Ephemeral acceptance: the real manifests, the real GHCR digests, real data, then the
+  # cluster is destroyed. Needs both the images and a green CDC chain, so unlike build and
+  # cdc-integration it is not parallel. Skipped on fork PRs, which cannot publish images
+  # for it to pull.
+  k8s-acceptance:
+    needs: [digest-manifest, cdc-integration, trust]
+    if: needs.trust.outputs.publish == 'true'
+    uses: ./.github/workflows/_deploy-k8s.yml
+
+  bundle-static:
+    # Structural validation of the Asset Bundle with no credentials and no network:
+    # resolves include globs, checks notebook paths exist, and checks every
+    # ${resources.*} reference names a declared resource. Safe on fork PRs, where
+    # secrets are unavailable -- which is exactly why the authenticated check below
+    # cannot run on every trigger.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+
+      - run: pip install -r requirements-ci.txt
+
+      - run: python scripts/validate_databricks_bundle.py
+
+  bundle-authenticated:
+    # `databricks bundle validate` authenticates: the dev target is mode: development,
+    # which resolves workspace identity to prefix resources. So it runs only on main,
+    # where secrets are available -- and it FAILS when they are missing rather than
+    # reporting a green check that never ran.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     env:
-      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      # Only the token is a secret. The dev target's host is committed in
+      # databricks/databricks.yml, so treating it as one would be theatre -- and setting
+      # DATABRICKS_HOST from an unset secret yields an empty string that SHADOWS the host
+      # the bundle file supplies, which fails in a way that looks nothing like the cause.
       DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: databricks/setup-cli@v1.9.0
 
+      - name: Require credentials
+        run: |
+          if [ -z "${DATABRICKS_TOKEN}" ]; then
+            echo "::error::DATABRICKS_TOKEN is not set." >&2
+            echo "Add it in repo settings. This check is not allowed to pass unconfigured --" >&2
+            echo "a bundle validation that silently skips is worse than one that fails." >&2
+            exit 1
+          fi
+
       - name: Validate bundle
-        if: env.DATABRICKS_HOST != ''
         working-directory: databricks
         run: databricks bundle validate -t dev
 
@@ -116,3 +391,68 @@ jobs:
         run: |
           terraform -chdir=infra/terraform/snowflake init -backend=false
           terraform -chdir=infra/terraform/snowflake validate
+
+  # The single check branch protection should require.
+  #
+  # Requiring the individual jobs would mean editing the protection rules every time the
+  # graph changes, and would have to encode which jobs are allowed to skip. Both live
+  # here instead, in code, reviewed like anything else.
+  #
+  # This is not merely "did everything pass": it distinguishes an intentional skip from
+  # an accidental one. digest-manifest and k8s-acceptance skip on fork PRs because a
+  # fork's token cannot publish images; bundle-authenticated skips off main because its
+  # secrets are unavailable. Any OTHER skip means a job silently did not run, which is
+  # treated as a failure -- that is the failure mode an aggregator usually hides.
+  ci-complete:
+    if: ${{ always() }}
+    needs:
+      - lint
+      - coverage-gate
+      - build
+      - digest-manifest
+      - cdc-integration
+      - k8s-acceptance
+      - bundle-static
+      - bundle-authenticated
+      - terraform
+      - dbt
+      - snowflake-terraform
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assert every required job succeeded
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+          # Jobs whose skip is a deliberate part of the design, with the condition that
+          # justifies it. Anything not listed here must actually run.
+          ALLOWED_SKIPS: digest-manifest,k8s-acceptance,bundle-authenticated
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          results = json.loads(os.environ["RESULTS"])
+          allowed = set(os.environ["ALLOWED_SKIPS"].split(","))
+
+          problems = []
+          for job, outcome in sorted(results.items()):
+              result = outcome["result"]
+              if result == "success":
+                  print(f"  ok       {job}")
+              elif result == "skipped" and job in allowed:
+                  print(f"  skipped  {job} (expected on this trigger)")
+              elif result == "skipped":
+                  print(f"  SKIPPED  {job}")
+                  problems.append(f"{job} was skipped but is not an allowed skip")
+              else:
+                  print(f"  {result.upper():8s} {job}")
+                  problems.append(f"{job} finished as '{result}'")
+
+          if problems:
+              print("\nCI is not complete:", file=sys.stderr)
+              for problem in problems:
+                  print(f"  - {problem}", file=sys.stderr)
+              sys.exit(1)
+
+          print("\nAll required jobs accounted for.")
+          PY
