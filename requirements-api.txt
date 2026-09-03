@@ -9,4 +9,4 @@
 #   pip install -r requirements-ci.txt -r requirements-api.txt
 #   uvicorn api.src.app:app --reload --port 8000
 trino==0.338.0
-uvicorn==0.51.0
+uvicorn==0.52.4
