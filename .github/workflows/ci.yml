@@ -34,7 +34,58 @@ jobs:
 
       - run: ruff check .
 
+  # The bucket list lives in tests/buckets.yml so the matrix and the inventory guard
+  # read the same source. tests/test_bucket_inventory.py fails if the two drift.
+  test-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install PyYAML==6.0.3
+
+      - id: build
+        name: Build the bucket matrix
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import yaml
+
+          with open("tests/buckets.yml", encoding="utf-8") as handle:
+              config = yaml.safe_load(handle)
+
+          # Every bucket measures the same sources -- see the note in buckets.yml.
+          cov = " ".join(f"--cov={source}" for source in config["coverage_sources"])
+          matrix = [
+              {"name": name, "paths": " ".join(bucket["paths"]), "cov": cov}
+              for name, bucket in sorted(config["buckets"].items())
+          ]
+          print(f"matrix={json.dumps(matrix)}")
+          PY
+
   test:
+    needs: test-matrix
+    strategy:
+      # One red bucket should not hide the state of the other five.
+      fail-fast: false
+      matrix:
+        bucket: ${{ fromJSON(needs.test-matrix.outputs.matrix) }}
+    uses: ./.github/workflows/_python-tests.yml
+    with:
+      bucket: ${{ matrix.bucket.name }}
+      paths: ${{ matrix.bucket.paths }}
+      cov: ${{ matrix.bucket.cov }}
+
+  # The one job branch protection should require. Splitting the suite splits its coverage
+  # data too; combining here keeps a single project-wide threshold instead of silently
+  # turning one 80% gate into six much harsher ones.
+  coverage-gate:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,20 +98,38 @@ jobs:
 
       - run: pip install -r requirements-ci.txt
 
-      # api/src is covered here without installing the Trino driver: trino_client imports it
-      # lazily inside connect_from_env, so every API test runs against a fake DBAPI connection.
-      # airflow/dags is listed to match .coveragerc -- without it CI and a local `pytest --cov`
-      # measure different code against the same 80% gate.
-      - run: >-
-          pytest
-          --cov=airflow/dags
-          --cov=config/spark/jobs
-          --cov=scripts
-          --cov=databricks/src/common.py
-          --cov=snowflake_etl/src
-          --cov=api/src
-          --cov-report=term-missing
-          --cov-fail-under=80
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-*
+          # Without merge-multiple each artifact lands in its own subdirectory and
+          # `coverage combine` finds nothing to combine.
+          merge-multiple: true
+
+      - name: Fail if no coverage data was collected
+        run: |
+          shopt -s nullglob dotglob
+          fragments=(.coverage.*)
+          if [ ${#fragments[@]} -eq 0 ]; then
+            echo "::error::No .coverage.* fragments were downloaded." >&2
+            echo "The gate must not pass on an empty data set." >&2
+            exit 1
+          fi
+          echo "Combining ${#fragments[@]} fragment(s): ${fragments[*]}"
+
+      - name: Combine and enforce the project threshold
+        run: |
+          coverage combine
+          coverage report --show-missing --fail-under=80
+
+      - name: Publish the combined report
+        if: ${{ !cancelled() }}
+        run: |
+          {
+            echo '### Combined coverage'
+            echo '```'
+            coverage report --show-missing || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   bundle-static:
     # Structural validation of the Asset Bundle with no credentials and no network:
