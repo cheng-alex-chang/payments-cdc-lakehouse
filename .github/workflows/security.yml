@@ -111,7 +111,7 @@ jobs:
           tags: scan/${{ matrix.image }}:${{ github.sha }}
           cache-from: type=gha,scope=${{ matrix.image }}
 
-      - uses: aquasecurity/trivy-action@0.28.0
+      - uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: scan/${{ matrix.image }}:${{ github.sha }}
           format: sarif
