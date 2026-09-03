@@ -2,6 +2,21 @@
 # base images. That is the right default for reproducibility, but pins do not update
 # themselves, and an unattended pin is how a project ends up years behind. Dependabot is
 # what makes exact pinning sustainable rather than a slow drift into staleness.
+#
+# On grouping: the first run opened nine PRs at once, and each one triggers the full
+# pipeline including the CDC chain and a kind cluster. The tempting fix is to path-filter
+# the expensive jobs so dependency bumps skip them. That is the wrong fix twice over.
+#
+# First, it would skip the thing that changed: config/api/Dockerfile installs
+# requirements-ci.txt and requirements-api.txt, so a pydantic or uvicorn bump lands in the
+# deployed payments-api image, and acceptance is what runs bench_api.py against it.
+#
+# Second, a path-filtered required check never reports at all, so the PR waits on a check
+# that will never arrive. Weakening the gate to save runner minutes trades a real signal
+# for a cosmetic one.
+#
+# The actual problem was nine simultaneous PRs, not eighteen minutes per PR. So the fix is
+# fewer, larger PRs -- grouped by concern so a failure is still bisectable.
 version: 2
 updates:
   - package-ecosystem: pip
@@ -10,10 +25,15 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     groups:
-      # One PR for the test/lint toolchain rather than five. These move together and are
-      # verified by the same suite, so reviewing them separately is noise.
+      # Test and lint tooling. Kept separate from runtime so a flaky tooling bump cannot
+      # sit in front of a runtime security patch.
       dev-tooling:
-        patterns: ["pytest*", "ruff", "moto", "httpx"]
+        patterns: ["pytest*", "ruff", "moto", "httpx", "pip-audit"]
+      # Everything else pip: fastapi, pydantic, uvicorn, boto3, the Snowflake and dbt
+      # stack. One PR, verified together by one pipeline run.
+      runtime:
+        patterns: ["*"]
+        exclude-patterns: ["pytest*", "ruff", "moto", "httpx", "pip-audit"]
 
   - package-ecosystem: docker
     directories:
@@ -22,6 +42,17 @@ updates:
       - /config/trino-exporter
     schedule:
       interval: weekly
+    groups:
+      base-images:
+        patterns: ["*"]
+    ignore:
+      # Airflow majors need a coordinated migration, not a base-image bump: Airflow 3
+      # moved BashOperator to airflow.providers.standard.operators.bash (both DAGs import
+      # the old path) and renamed the webserver to api-server, which scripts/k8s_verify.sh
+      # waits on by literal name and tests/test_validate_k8s_manifests.py asserts against
+      # the manifests. Tracked as real work; see the discussion on PR #3.
+      - dependency-name: apache/airflow
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /

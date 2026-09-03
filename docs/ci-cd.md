@@ -136,6 +136,25 @@ A fork's `GITHUB_TOKEN` is read-only and has no `packages: write`.
 accidental one: the three above are allowed to skip, and any *other* skip fails the build
 — that is the failure mode an aggregator usually hides.
 
+## Why the expensive jobs are not path-filtered
+
+Every pull request, dependency bumps included, runs the CDC chain and a kind acceptance
+cluster. Skipping those for `requirements-*.txt`-only changes looks like free savings. It
+is not, for two reasons:
+
+- **It would skip the thing that changed.** `config/api/Dockerfile` installs
+  `requirements-ci.txt` and `requirements-api.txt`, so a pydantic or uvicorn bump lands in
+  the deployed `payments-api` image — and acceptance is what runs `bench_api.py` and the
+  smoke checks against it.
+- **A path-filtered required check never reports.** It does not pass or fail; it simply
+  never arrives, and the pull request waits forever on a check that will not come.
+
+The pile-up that prompted the question was nine simultaneous Dependabot PRs, not the
+per-PR cost. That is a Dependabot configuration problem, and it is fixed there: updates
+are grouped into at most four PRs a week, split by concern so a failure is still
+bisectable. If this ever becomes a team repository, the next step is a merge queue —
+batch the PRs and run the expensive suite once per batch — not a weaker gate.
+
 ## Branch protection
 
 Require exactly one check: **`ci-complete`**. Requiring individual jobs would mean editing
