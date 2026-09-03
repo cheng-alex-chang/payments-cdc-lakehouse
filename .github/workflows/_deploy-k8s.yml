@@ -80,32 +80,50 @@ jobs:
         with:
           name: image-manifest
 
+      - name: Install kustomize
+        # `kubectl kustomize` renders but has no `edit` subcommand, and the digests are
+        # only known at this point in the run.
+        run: |
+          curl -sSLo /tmp/kustomize.tar.gz \
+            https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.4.3/kustomize_v5.4.3_linux_amd64.tar.gz
+          tar -xzf /tmp/kustomize.tar.gz -C /usr/local/bin
+          kustomize version
+
       - name: Pin the overlay to the built digests
         # A committed overlay cannot contain a digest that does not exist yet, so the
         # images transform is written here from the build stage's manifest. Digests, not
         # tags: a tag can be repointed, which would break "promote the same artifact".
         run: |
-          curl -sSLo /tmp/kustomize.tar.gz \
-            https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.4.3/kustomize_v5.4.3_linux_amd64.tar.gz
-          tar -xzf /tmp/kustomize.tar.gz -C /tmp
-          cd "${{ inputs.overlay }}"
           python3 - <<'PY' > /tmp/pins.sh
           import json
-          with open("images.json", encoding="utf-8") as handle:
+          import os
+
+          # download-artifact extracted images.json into the workspace root; kustomize edit
+          # has to run inside the overlay, so read by absolute path rather than relying on
+          # the working directory.
+          path = os.path.join(os.environ["GITHUB_WORKSPACE"], "images.json")
+          with open(path, encoding="utf-8") as handle:
               manifest = json.load(handle)
+
           local = {
               "payments-api": "local/payments-api",
               "data-pipeline-airflow": "local/data-pipeline-airflow",
               "trino-exporter": "local/trino-exporter",
           }
+          missing = sorted(set(local) - set(manifest))
+          if missing:
+              raise SystemExit(f"image manifest is missing: {missing}")
+
           for image, entry in sorted(manifest.items()):
-              print(f"/tmp/kustomize edit set image "
+              print(f"kustomize edit set image "
                     f"{local[image]}={entry['repository']}@{entry['digest']}")
           PY
-          cp ../../../images.json . 2>/dev/null || true
+
+          cat /tmp/pins.sh
+          cd "${{ inputs.overlay }}"
           bash /tmp/pins.sh
           echo "--- pinned images ---"
-          grep -A4 '^images:' kustomization.yaml
+          sed -n '/^images:/,$p' kustomization.yaml
 
       - name: Apply the manifests
         # Same invocation as scripts/k8s_up.sh, load-restrictor included: the base
