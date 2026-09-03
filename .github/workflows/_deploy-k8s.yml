@@ -64,6 +64,18 @@ jobs:
         run: |
           cp k8s/overlays/local/secrets.env.example "${{ inputs.overlay }}/secrets.env"
 
+      # The namespace and pull secret must exist BEFORE the workloads, or the first pods
+      # to schedule hit ImagePullBackOff. GitHub makes a new package private by default and
+      # kind nodes do not inherit the runner's docker login.
+      - name: Create the namespace and GHCR pull secret
+        run: |
+          kubectl apply -f k8s/base/namespace.yaml
+          kubectl create secret docker-registry ghcr-pull \
+            --namespace "$NAMESPACE" \
+            --docker-server=ghcr.io \
+            --docker-username="${{ github.actor }}" \
+            --docker-password="${{ secrets.GITHUB_TOKEN }}"
+
       - uses: actions/download-artifact@v4
         with:
           name: image-manifest

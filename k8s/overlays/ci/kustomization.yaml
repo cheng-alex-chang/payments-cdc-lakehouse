@@ -48,6 +48,10 @@ secretGenerator:
 # the cluster where actions/cache cannot reach. The patch points that path at a hostPath
 # the kind node maps to the runner's cached directory -- see k8s/kind-config-ci.yaml.
 patches:
+  - path: imagepullsecret-patch.yaml
+    target:
+      kind: (Deployment|StatefulSet|Job)
+
   - path: ivy-cache-patch.yaml
     target:
       kind: Job
