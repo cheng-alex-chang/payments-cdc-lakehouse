@@ -45,7 +45,7 @@ so gating one on the other would cost minutes for nothing.
 | File | Purpose |
 |---|---|
 | `ci.yml` | Everything on a PR: validate, test, build, CDC, acceptance |
-| `release-cloud.yml` | `main` only: Databricks, Snowflake, dbt, behind approval |
+| `release-cloud.yml` | **Manual only** (see below): Databricks, Snowflake, dbt, behind approval |
 | `security.yml` | CodeQL, Trivy, pip-audit, gitleaks; also weekly |
 | `_python-tests.yml` | Reusable: one test bucket |
 | `_docker-build.yml` | Reusable: build, publish, record digest |
@@ -100,6 +100,25 @@ method/status sets, no duplicate silver keys, and no unhashed `shopper_id` in br
 the `dev` target is `mode: development`, which resolves workspace identity. So PRs run
 `scripts/validate_databricks_bundle.py` (structural, no network) and only `main` runs the
 authenticated command — where a missing secret **fails** rather than reporting green.
+
+## Why the cloud release is manual
+
+The workflow is written and gated, but `workflow_dispatch` only. It cannot run
+unattended today for two reasons, neither fixable with a secret:
+
+- **No live Snowflake account.** The trial expired. The rehearsal's `dbt build` and the
+  Snowflake `terraform plan` both need a real connection.
+- **No separate Databricks workspace.** Free Edition provides one. The `prod` target uses
+  `mode: production`, which drops the per-user prefixing `dev` relies on, so
+  `bundle deploy -t prod` would deploy into the workspace `dev` already occupies.
+
+Left on a merge trigger it guaranteed a red `main` while deploying nothing — the run died
+at credential loading, before the approval gate. Nothing is lost by making it manual:
+`ci.yml`'s `bundle-authenticated` job already validates the Databricks bundle on every push
+to `main`, which is the only part of this track that can currently run.
+
+Restore `push: branches: [main]` when there is an account to rehearse against and a
+workspace worth promoting into.
 
 ## Fork pull requests
 
