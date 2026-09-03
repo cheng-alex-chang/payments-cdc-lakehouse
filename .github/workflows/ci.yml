@@ -154,6 +154,12 @@ jobs:
   # upstream spark:3.5.8-python3 with jobs submitted as loose .py files.
   build:
     needs: [coverage-gate, trust]
+    # A called workflow cannot hold more permission than its caller grants, and this
+    # workflow's default is contents: read. _docker-build.yml requests packages: write
+    # to publish to GHCR, so the calling job has to grant it here.
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
