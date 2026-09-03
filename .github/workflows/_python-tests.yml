@@ -32,9 +32,9 @@ jobs:
     name: ${{ inputs.bucket }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
@@ -60,7 +60,7 @@ jobs:
           --cov-report=
           --junitxml=junit-${{ inputs.bucket }}.xml
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: coverage-${{ inputs.bucket }}
           path: .coverage.${{ inputs.bucket }}
@@ -70,7 +70,7 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: ${{ !cancelled() }}
         with:
           name: junit-${{ inputs.bucket }}
