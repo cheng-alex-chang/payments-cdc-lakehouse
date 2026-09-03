@@ -138,9 +138,14 @@ jobs:
         # fails on a cluster whose pods are all CrashLoopBackOff. It covers Deployments
         # and StatefulSets only, which is exactly right here: the Jobs are still
         # suspended at this point and are activated below.
-        run: bash scripts/k8s_verify.sh
+        # helm/kind-action writes to the default kubeconfig; k8s_verify.sh defaults to the
+        # path k8s_up.sh uses locally and honours KUBECONFIG when exported.
+        run: |
+          export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
+          bash scripts/k8s_verify.sh
         env:
-          VERIFY_TIMEOUT: 600s
+          # A cold kind node pulls roughly eighteen images before anything reports ready.
+          VERIFY_TIMEOUT: 900s
 
       - name: Activate the connector registration Job
         # register-postgres-cdc is already a python:3.11-slim Job that talks to
