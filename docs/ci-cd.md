@@ -26,7 +26,7 @@ same artifact" untrue, because the cloud track has no image to promote.
          ┌─────────────┴─────────────┐
          ↓                           ↓
       Build                       CDC E2E
-  3 images → GHCR @digest    Postgres→Debezium→Kafka
+  4 images → GHCR @digest    Postgres→Debezium→Kafka
                                 →Spark→Iceberg
          └─────────────┬─────────────┘
                        ↓
@@ -54,7 +54,7 @@ at `@v1`: `python-tests.yml`, `docker-build.yml`, `k8s-acceptance.yml`.
 
 ## Decisions worth knowing
 
-**Tests split for attribution, not speed.** The suite is ~330 tests in about a second. Six
+**Tests split for attribution, not speed.** The suite is ~357 tests in about a second. Six
 buckets exist so a failure names the component that broke, not to save time.
 
 **All buckets measure the same coverage sources.** Narrowing sources per bucket was

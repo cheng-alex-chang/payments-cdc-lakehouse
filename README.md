@@ -126,7 +126,8 @@ config/connect/                Debezium connector config
 config/grafana/                Grafana provisioning and dashboards
 config/postgres/init/          Postgres schema and seed data
 config/prometheus/             Prometheus config
-config/spark/jobs/             Spark jobs
+config/spark/Dockerfile        Spark image with the medallion's Maven dependencies pre-resolved
+config/spark/jobs/             Spark jobs + the shared payment rules they and the DLT port both enforce
 config/statsd/                 StatsD exporter mapping for Airflow metrics
 config/trino/                  Trino config and Iceberg catalog
 config/trino-exporter/         Custom Trino REST -> Prometheus exporter
@@ -253,8 +254,12 @@ pytest -m integration_cdc tests/integration/test_cdc_chain.py
 ```
 
 CI runs the fast suite as six per-component jobs behind a single project-wide coverage
-gate. How the buckets are defined, and the rest of the pipeline, is in
-[docs/ci-cd.md](docs/ci-cd.md).
+gate, then builds four images to GHCR, proves the CDC chain end to end, and deploys those
+exact digests into an ephemeral kind cluster for smoke and data-quality checks before
+anything can merge. The mechanics of the three expensive stages live in a separate
+[platform-ci](https://github.com/cheng-alex-chang/platform-ci) repository and are consumed
+at a pinned version, so the pipeline shape stays this repo's business while the stage
+implementations are shared. Full detail in [docs/ci-cd.md](docs/ci-cd.md).
 
 ## Databricks (Lakeflow Declarative Pipeline)
 
