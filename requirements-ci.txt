@@ -1,7 +1,7 @@
-prometheus-client==0.25.0
+prometheus-client==0.26.0
 psycopg2-binary==2.9.12
 requests==2.34.2
-boto3==1.43.37
+boto3==1.43.83
 moto==5.2.3
 pytest==9.1.1
 pytest-cov==7.1.0
@@ -11,6 +11,6 @@ ruff==0.16.5
 # TestClient. The `trino` driver is deliberately NOT here -- api/src/trino_client.py imports it
 # lazily inside connect_from_env, so the whole API test suite runs with no driver and no
 # warehouse. Keeping it out of CI is what proves that.
-fastapi==0.140.7
-pydantic==2.13.4
+fastapi==0.141.1
+pydantic==2.13.5
 httpx==0.28.1
