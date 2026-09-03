@@ -75,7 +75,7 @@ jobs:
       fail-fast: false
       matrix:
         bucket: ${{ fromJSON(needs.test-matrix.outputs.matrix) }}
-    uses: ./.github/workflows/_python-tests.yml
+    uses: cheng-alex-chang/platform-ci/.github/workflows/python-tests.yml@v1
     with:
       bucket: ${{ matrix.bucket.name }}
       paths: ${{ matrix.bucket.paths }}
@@ -177,7 +177,7 @@ jobs:
           - image: payments-spark
             dockerfile: config/spark/Dockerfile
             context: .
-    uses: ./.github/workflows/_docker-build.yml
+    uses: cheng-alex-chang/platform-ci/.github/workflows/docker-build.yml@v1
     with:
       image: ${{ matrix.image }}
       dockerfile: ${{ matrix.dockerfile }}
@@ -279,7 +279,7 @@ jobs:
   k8s-acceptance:
     needs: [digest-manifest, cdc-integration, trust]
     if: needs.trust.outputs.publish == 'true'
-    uses: ./.github/workflows/_deploy-k8s.yml
+    uses: cheng-alex-chang/platform-ci/.github/workflows/k8s-acceptance.yml@v1
 
   bundle-static:
     # Structural validation of the Asset Bundle with no credentials and no network:
