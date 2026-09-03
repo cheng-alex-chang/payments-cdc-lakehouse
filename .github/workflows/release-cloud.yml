@@ -7,9 +7,23 @@
 # chain would make "promote the same artifact" a lie, since this track has no image.
 name: Cloud release
 
+# Manual only, deliberately.
+#
+# This track needs a live Snowflake account (the rehearsal's dbt build, and the
+# Snowflake Terraform plan, which reads account state) and a Databricks workspace
+# separate from dev. Neither exists today: the Snowflake trial has expired, and
+# Databricks Free Edition provides a single workspace, so `bundle deploy -t prod`
+# would deploy into the same workspace dev already occupies -- mode: production drops
+# the per-user prefixing dev relies on.
+#
+# Firing on every merge therefore guaranteed a red main while deploying nothing: the
+# run died at credential loading, before the approval gate. Nothing is lost by making
+# it manual, because ci.yml's bundle-authenticated job already validates the Databricks
+# bundle on every push to main -- the only part of this workflow that can currently run.
+#
+# Restore `push: branches: [main]` when there is a Snowflake account to rehearse
+# against and a workspace worth promoting into.
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
