@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 
 from common import configure_iceberg, checkpoint_path
+from payment_rules import ALLOWED_PAYMENT_METHODS, ALLOWED_PAYMENT_STATUSES
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql.functions import (
     count,
@@ -25,23 +26,6 @@ BRONZE_TABLE    = "iceberg.analytics.payments_bronze"
 SILVER_TABLE    = "iceberg.analytics.payments_silver"
 DLQ_TABLE       = "iceberg.analytics.payments_silver_dlq"
 CHECKPOINT_PATH = checkpoint_path("silver")
-
-ALLOWED_PAYMENT_METHODS = (
-    "apple_pay",
-    "bank_transfer",
-    "card",
-    "google_pay",
-    "paypal",
-)
-
-ALLOWED_PAYMENT_STATUSES = (
-    "authorized",
-    "cancelled",
-    "chargeback",
-    "failed",
-    "pending",
-    "refunded",
-)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
 LOGGER = logging.getLogger(__name__)

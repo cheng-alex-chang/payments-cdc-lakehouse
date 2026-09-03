@@ -518,52 +518,10 @@ def test_validate_connector_requests_the_configured_url(monkeypatch: pytest.Monk
 # bronze job
 # ---------------------------------------------------------------------------
 
-def test_mask_pii_fields_hashes_shopper_id_in_after(monkeypatch: pytest.MonkeyPatch) -> None:
-    module, _, _ = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.bronze_from_kafka")
-    payload = json.dumps({"after": {"payment_id": "p1", "shopper_id": "user-123"}, "op": "c"})
-    result = json.loads(module._mask_pii_fields(payload))
-    assert result["after"]["shopper_id"] != "user-123"
-    assert len(result["after"]["shopper_id"]) == 64  # SHA-256 hex digest
-    assert result["after"]["payment_id"] == "p1"
-
-
-def test_mask_pii_fields_hashes_shopper_id_in_before(monkeypatch: pytest.MonkeyPatch) -> None:
-    module, _, _ = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.bronze_from_kafka")
-    payload = json.dumps({"before": {"payment_id": "p1", "shopper_id": "user-123"}, "after": None, "op": "d"})
-    result = json.loads(module._mask_pii_fields(payload))
-    assert result["before"]["shopper_id"] != "user-123"
-    assert len(result["before"]["shopper_id"]) == 64
-
-
-def test_mask_pii_fields_is_deterministic(monkeypatch: pytest.MonkeyPatch) -> None:
-    module, _, _ = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.bronze_from_kafka")
-    payload = json.dumps({"after": {"shopper_id": "user-123"}, "op": "c"})
-    first = json.loads(module._mask_pii_fields(payload))["after"]["shopper_id"]
-    second = json.loads(module._mask_pii_fields(payload))["after"]["shopper_id"]
-    assert first == second
-
-
-def test_mask_pii_fields_returns_none_for_null_input(monkeypatch: pytest.MonkeyPatch) -> None:
-    module, _, _ = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.bronze_from_kafka")
-    assert module._mask_pii_fields(None) is None
-
-
-def test_mask_pii_fields_passes_through_malformed_json(monkeypatch: pytest.MonkeyPatch) -> None:
-    module, _, _ = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.bronze_from_kafka")
-    bad = "not-json"
-    assert module._mask_pii_fields(bad) == bad
-
-
-def test_mask_pii_fields_skips_envelope_without_pii(monkeypatch: pytest.MonkeyPatch) -> None:
-    module, _, _ = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.bronze_from_kafka")
-    payload = json.dumps({"after": {"payment_id": "p1", "amount": "99.00"}, "op": "c"})
-    result = json.loads(module._mask_pii_fields(payload))
-    assert result["after"] == {"payment_id": "p1", "amount": "99.00"}
-
-
-# ---------------------------------------------------------------------------
-# bronze job
-# ---------------------------------------------------------------------------
+# The masking tests that lived here moved to tests/test_payment_rules.py when
+# _mask_pii_fields was extracted into config/spark/jobs/payment_rules.py. They live beside
+# the rule now, and cover more: every branch of the envelope handling, plus behavioural
+# equivalence with the copy inlined in databricks/src/dlt_pipeline.py.
 
 
 def test_bronze_from_kafka_streams_to_iceberg(monkeypatch: pytest.MonkeyPatch) -> None:
