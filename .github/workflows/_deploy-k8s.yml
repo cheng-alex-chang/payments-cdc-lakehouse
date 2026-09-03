@@ -1,0 +1,203 @@
+# Reusable: deploy to an ephemeral kind cluster and assert the result.
+#
+# This is acceptance, not an environment. It proves the immutable GHCR digests from the
+# build stage deploy under the project's real manifests and produce correct data, then
+# the cluster is destroyed. Nothing is promoted out of it.
+#
+# The orchestration contract already exists in the manifests: every operational Job ships
+# `suspend: true`, so `kubectl apply` creates them without firing them. CI activates them
+# in order and waits for each. That is why there is no delete-and-recreate here -- Job pod
+# templates are immutable, and fighting that would be inventing a CI-only execution path
+# instead of exercising the one the platform already defines.
+name: Kubernetes acceptance
+
+on:
+  workflow_call:
+    inputs:
+      overlay:
+        description: Kustomize overlay to deploy.
+        required: false
+        default: k8s/overlays/ci
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  NAMESPACE: data-pipeline
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+
+      - run: pip install -r requirements-ci.txt
+
+      # The Spark Jobs resolve --packages into a pod-local Ivy dir. kind-config-ci.yaml
+      # maps this host directory into the node and the overlay hostPath-mounts it into
+      # the three Jobs, so ~100MB of Maven traffic happens on a cache miss, not per Job.
+      - uses: actions/cache@v4
+        with:
+          path: .ci-cache/ivy
+          key: ivy-k8s-${{ hashFiles('airflow/dags/spark_jobs.py', 'k8s/base/spark.yaml') }}
+          restore-keys: ivy-k8s-
+
+      - name: Prepare host directories
+        run: mkdir -p .ci-cache/ivy
+
+      - uses: helm/kind-action@v1
+        with:
+          config: k8s/kind-config-ci.yaml
+          cluster_name: data-pipeline
+
+      - name: Generate throwaway cluster credentials
+        # The overlay's secretGenerator reads secrets.env, which is gitignored. The
+        # cluster lives for minutes on an ephemeral runner and is then destroyed.
+        run: |
+          cp k8s/overlays/local/secrets.env.example "${{ inputs.overlay }}/secrets.env"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: image-manifest
+
+      - name: Pin the overlay to the built digests
+        # A committed overlay cannot contain a digest that does not exist yet, so the
+        # images transform is written here from the build stage's manifest. Digests, not
+        # tags: a tag can be repointed, which would break "promote the same artifact".
+        run: |
+          curl -sSLo /tmp/kustomize.tar.gz \
+            https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.4.3/kustomize_v5.4.3_linux_amd64.tar.gz
+          tar -xzf /tmp/kustomize.tar.gz -C /tmp
+          cd "${{ inputs.overlay }}"
+          python3 - <<'PY' > /tmp/pins.sh
+          import json
+          with open("images.json", encoding="utf-8") as handle:
+              manifest = json.load(handle)
+          local = {
+              "payments-api": "local/payments-api",
+              "data-pipeline-airflow": "local/data-pipeline-airflow",
+              "trino-exporter": "local/trino-exporter",
+          }
+          for image, entry in sorted(manifest.items()):
+              print(f"/tmp/kustomize edit set image "
+                    f"{local[image]}={entry['repository']}@{entry['digest']}")
+          PY
+          cp ../../../images.json . 2>/dev/null || true
+          bash /tmp/pins.sh
+          echo "--- pinned images ---"
+          grep -A4 '^images:' kustomization.yaml
+
+      - name: Apply the manifests
+        # Same invocation as scripts/k8s_up.sh, load-restrictor included: the base
+        # kustomization generates ConfigMaps from the repo's real config files rather
+        # than copies, so Compose and Kubernetes cannot drift.
+        run: |
+          kubectl kustomize --load-restrictor=LoadRestrictionsNone "${{ inputs.overlay }}" \
+            | kubectl apply -f -
+
+      - name: Wait for the platform to be ready
+        # scripts/k8s_verify.sh checks `rollout status` rather than existence, so it
+        # fails on a cluster whose pods are all CrashLoopBackOff. It covers Deployments
+        # and StatefulSets only, which is exactly right here: the Jobs are still
+        # suspended at this point and are activated below.
+        run: bash scripts/k8s_verify.sh
+        env:
+          VERIFY_TIMEOUT: 600s
+
+      - name: Activate the connector registration Job
+        # register-postgres-cdc is already a python:3.11-slim Job that talks to
+        # kafka-connect:8083 over service DNS and reads platform-secrets. It is the
+        # Kubernetes-native path -- the Debezium image contains none of this repo's code,
+        # so `kubectl exec` into it would have nothing to run.
+        run: |
+          kubectl patch job register-postgres-cdc -n "$NAMESPACE" -p '{"spec":{"suspend":false}}'
+          kubectl wait --for=condition=complete job/register-postgres-cdc \
+            -n "$NAMESPACE" --timeout=300s
+
+      - name: Activate the demo data seed
+        run: |
+          kubectl patch job seed-demo-data -n "$NAMESPACE" -p '{"spec":{"suspend":false}}'
+          kubectl wait --for=condition=complete job/seed-demo-data -n "$NAMESPACE" --timeout=300s
+
+      - name: Run the medallion
+        # Strictly ordered: gold reads silver, silver reads bronze. Running them
+        # concurrently would assert against a half-built warehouse.
+        run: |
+          for layer in bronze silver gold; do
+            echo "::group::spark-${layer}"
+            kubectl patch job "spark-${layer}" -n "$NAMESPACE" -p '{"spec":{"suspend":false}}'
+            kubectl wait --for=condition=complete "job/spark-${layer}" \
+              -n "$NAMESPACE" --timeout=1200s
+            echo "::endgroup::"
+          done
+
+      - name: Open port-forwards
+        # The smoke and DQ scripts are written for in-network addresses. Forwarding lets
+        # them run unmodified from the runner via their documented env overrides, rather
+        # than growing a second CI-only code path.
+        run: |
+          kubectl port-forward -n "$NAMESPACE" svc/kafka-connect 8083:8083 &
+          kubectl port-forward -n "$NAMESPACE" svc/trino 8080:8080 &
+          kubectl port-forward -n "$NAMESPACE" svc/api 8000:8000 &
+          for port in 8083 8080 8000; do
+            for _ in $(seq 1 30); do
+              nc -z localhost "$port" && break
+              sleep 2
+            done
+          done
+
+      - name: Smoke checks
+        env:
+          CONNECT_URL: http://localhost:8083
+          TRINO_HTTP_HOST: localhost
+          TRINO_HTTP_PORT: "8080"
+        run: |
+          python scripts/validate_connector.py
+          python scripts/publish_trino_tables.py
+          python scripts/validate_trino.py
+
+      - name: Data-quality gate
+        # Distinct from the smoke checks above: validate_trino.py only proves the queries
+        # execute. These assert values, and fail the deployment when the data is wrong.
+        env:
+          TRINO_HTTP_HOST: localhost
+          TRINO_HTTP_PORT: "8080"
+        run: python scripts/acceptance_checks.py
+
+      - name: API latency floor
+        run: python scripts/bench_api.py --base-url http://localhost:8000 --requests 20
+
+      - name: Collect diagnostics on failure
+        if: failure()
+        run: |
+          mkdir -p k8s-diagnostics
+          kubectl get all -n "$NAMESPACE" -o wide > k8s-diagnostics/resources.txt 2>&1 || true
+          kubectl get events -n "$NAMESPACE" --sort-by=.lastTimestamp \
+            > k8s-diagnostics/events.txt 2>&1 || true
+          for pod in $(kubectl get pods -n "$NAMESPACE" -o name 2>/dev/null); do
+            name="${pod#pod/}"
+            kubectl describe "$pod" -n "$NAMESPACE" > "k8s-diagnostics/describe-${name}.txt" 2>&1 || true
+            kubectl logs "$pod" -n "$NAMESPACE" --all-containers --tail 300 \
+              > "k8s-diagnostics/logs-${name}.txt" 2>&1 || true
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: k8s-diagnostics
+          path: k8s-diagnostics/
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Destroy the cluster
+        # Ephemeral by design: rollback is not a concept here, a failed run is discarded.
+        if: always()
+        run: kind delete cluster --name data-pipeline || true

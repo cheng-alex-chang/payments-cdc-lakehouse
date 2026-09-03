@@ -270,6 +270,15 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  # Ephemeral acceptance: the real manifests, the real GHCR digests, real data, then the
+  # cluster is destroyed. Needs both the images and a green CDC chain, so unlike build and
+  # cdc-integration it is not parallel. Skipped on fork PRs, which cannot publish images
+  # for it to pull.
+  k8s-acceptance:
+    needs: [digest-manifest, cdc-integration, trust]
+    if: needs.trust.outputs.publish == 'true'
+    uses: ./.github/workflows/_deploy-k8s.yml
+
   bundle-static:
     # Structural validation of the Asset Bundle with no credentials and no network:
     # resolves include globs, checks notebook paths exist, and checks every

@@ -60,6 +60,7 @@ buckets:
 
   platform:
     paths:
+      - tests/test_acceptance_checks.py
       - tests/test_bucket_inventory.py
       - tests/test_compose_manifest.py
       - tests/test_databricks_helpers.py

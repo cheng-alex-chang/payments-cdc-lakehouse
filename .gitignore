@@ -7,6 +7,7 @@ __pycache__/
 .claude/
 .env
 k8s/overlays/local/secrets.env
+k8s/overlays/ci/secrets.env
 config/trino/etc/log.properties
 .kind/
 .terraform/

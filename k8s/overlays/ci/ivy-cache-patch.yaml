@@ -1,0 +1,19 @@
+# Points each Spark Job's Ivy cache at a hostPath the kind node maps to the runner, so
+# the Maven resolution happens once per cache key instead of once per Job per run.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: placeholder  # replaced per-target by the kustomize patch selector
+spec:
+  template:
+    spec:
+      containers:
+        - name: spark
+          volumeMounts:
+            - name: ivy-cache
+              mountPath: /tmp/.ivy2
+      volumes:
+        - name: ivy-cache
+          hostPath:
+            path: /ivy-cache
+            type: DirectoryOrCreate
