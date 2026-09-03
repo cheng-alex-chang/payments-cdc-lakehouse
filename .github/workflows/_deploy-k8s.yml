@@ -29,7 +29,7 @@ env:
 jobs:
   acceptance:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -136,6 +136,27 @@ jobs:
         env:
           # A cold kind node pulls roughly eighteen images before anything reports ready.
           VERIFY_TIMEOUT: 900s
+
+      - name: Bootstrap object storage and the catalog
+        # The medallion cannot write until the MinIO buckets exist and the Lakekeeper
+        # warehouse is registered. Under Kubernetes these are not Jobs -- they are the
+        # payments_pipeline DAG's first two tasks, run as BashOperators inside the Airflow
+        # container. Skipping them fails deep in Spark with "A warehouse 'payments' does
+        # not exist", nowhere near the cause.
+        #
+        # Executed in airflow-scheduler rather than from the runner because that is where
+        # the DAG runs them: the scripts are mounted at /opt/airflow/scripts, the S3
+        # credentials come from platform-secrets, and the script defaults
+        # (http://minio:9000, http://iceberg-rest:8181) are in-network names that only
+        # resolve inside the cluster. Running them from a port-forward would register a
+        # warehouse pointing at an endpoint no pod can reach.
+        run: |
+          for script in init_object_store init_iceberg_catalog; do
+            echo "::group::${script}"
+            kubectl exec -n "$NAMESPACE" deploy/airflow-scheduler -- \
+              python "/opt/airflow/scripts/${script}.py"
+            echo "::endgroup::"
+          done
 
       - name: Activate the connector registration Job
         # register-postgres-cdc is already a python:3.11-slim Job that talks to
