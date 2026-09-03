@@ -104,8 +104,10 @@ def checks() -> list[tuple[str, str, str]]:
             "no_unhashed_pii_in_bronze",
             # bronze_from_kafka.py replaces shopper_id with a 64-char SHA-256 digest.
             # A bare integer still in the envelope means PII reached the lakehouse.
+            # \s* around the colon: the converter's spacing is not this check's business,
+            # and a pattern that assumes compact JSON would quietly match nothing.
             f"SELECT count(*) FROM {BRONZE} "
-            "WHERE regexp_like(kafka_value, '\"shopper_id\":[0-9]+')",
+            "WHERE regexp_like(kafka_value, '\"shopper_id\"\\s*:\\s*[0-9]')",
             "unhashed shopper_id found in bronze -- PII masking regressed",
         ),
     ]

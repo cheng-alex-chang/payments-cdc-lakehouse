@@ -262,22 +262,35 @@ def test_pii_is_hashed_before_bronze(cdc_chain):
 
     This is the rule duplicated verbatim into databricks/src/dlt_pipeline.py with nothing
     asserting the two copies agree. Here at least one of them is enforced.
+
+    Matched with json_extract_scalar rather than a LIKE over the raw envelope: the
+    serialized spacing is Debezium's business, not this test's, and a pattern like
+    '%"payment_id":999001%' silently matches nothing if the converter emits a space.
+    Extracting the field is also exactly what silver_payments.py does.
     """
     rows = query(
-        "SELECT kafka_value FROM iceberg.analytics.payments_bronze "
-        f"WHERE kafka_value LIKE '%\"payment_id\":{PAYMENT_ID}%' LIMIT 1"
+        "SELECT json_extract_scalar(kafka_value, '$.after.shopper_id') "
+        "FROM iceberg.analytics.payments_bronze "
+        "WHERE json_extract_scalar(kafka_value, '$.after.payment_id') = "
+        f"'{PAYMENT_ID}' LIMIT 1"
     )
     assert rows, "the seeded payment never reached bronze"
 
-    envelope = json.loads(rows[0][0])
-    after = envelope.get("after") or {}
-    hashed = after.get("shopper_id")
-
-    assert hashed != SHOPPER_ID, "shopper_id reached bronze unhashed"
-    assert hashed != str(SHOPPER_ID), "shopper_id reached bronze unhashed"
-    assert isinstance(hashed, str) and len(hashed) == 64, (
+    hashed = rows[0][0]
+    assert hashed not in (SHOPPER_ID, str(SHOPPER_ID)), "shopper_id reached bronze unhashed"
+    assert hashed is not None and len(hashed) == 64, (
         f"shopper_id is not a SHA-256 hex digest: {hashed!r}"
     )
+    assert all(c in "0123456789abcdef" for c in hashed), f"not hex: {hashed!r}"
+
+
+def test_no_row_in_bronze_carries_a_numeric_shopper_id(cdc_chain):
+    """The seeded row is one payment; this covers the whole snapshot."""
+    rows = query(
+        "SELECT count(*) FROM iceberg.analytics.payments_bronze "
+        "WHERE regexp_like(kafka_value, '\"shopper_id\"\\s*:\\s*[0-9]')"
+    )
+    assert int(rows[0][0]) == 0, "an unhashed numeric shopper_id is present in bronze"
 
 
 def test_silver_canonicalised_the_row(cdc_chain):
