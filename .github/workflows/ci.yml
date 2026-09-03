@@ -307,7 +307,10 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     env:
-      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      # Only the token is a secret. The dev target's host is committed in
+      # databricks/databricks.yml, so treating it as one would be theatre -- and setting
+      # DATABRICKS_HOST from an unset secret yields an empty string that SHADOWS the host
+      # the bundle file supplies, which fails in a way that looks nothing like the cause.
       DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
     steps:
       - uses: actions/checkout@v4
@@ -316,12 +319,10 @@ jobs:
 
       - name: Require credentials
         run: |
-          missing=()
-          [ -n "${DATABRICKS_HOST}"  ] || missing+=(DATABRICKS_HOST)
-          [ -n "${DATABRICKS_TOKEN}" ] || missing+=(DATABRICKS_TOKEN)
-          if [ ${#missing[@]} -ne 0 ]; then
-            echo "::error::Missing required secret(s): ${missing[*]}" >&2
-            echo "Set them in repo settings; this check is not allowed to pass unconfigured." >&2
+          if [ -z "${DATABRICKS_TOKEN}" ]; then
+            echo "::error::DATABRICKS_TOKEN is not set." >&2
+            echo "Add it in repo settings. This check is not allowed to pass unconfigured --" >&2
+            echo "a bundle validation that silently skips is worse than one that fails." >&2
             exit 1
           fi
 
