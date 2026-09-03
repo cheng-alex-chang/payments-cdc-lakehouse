@@ -216,6 +216,60 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+  # Proves the CDC chain actually moves data, rather than inferring it from manifests.
+  # Runs in PARALLEL with build: none of the three images this repo builds take part in
+  # the chain, so making it wait on them would add minutes for nothing. It also runs on
+  # fork PRs for the same reason -- it needs no registry and no secrets.
+  cdc-integration:
+    needs: coverage-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+
+      - run: pip install -r requirements-ci.txt
+
+      # Spark resolves its Iceberg/Kafka jars with --packages into a container-local Ivy
+      # directory that dies with the container. docker-compose.ci.yml bind-mounts it here
+      # so the ~100MB Maven fetch happens on a cache miss, not on every run.
+      - uses: actions/cache@v4
+        with:
+          path: .ci-cache/ivy
+          key: ivy-${{ hashFiles('scripts/run_local_job.py', 'airflow/dags/spark_jobs.py') }}
+          restore-keys: ivy-
+
+      - name: Seed the compose environment
+        run: |
+          mkdir -p .ci-cache/ivy
+          cp .env.example .env
+
+      # Services are named explicitly. A compose override merges into the base rather than
+      # subtracting from it, so `up` with no arguments would start all eighteen services.
+      - name: Run the CDC chain end to end
+        env:
+          COMPOSE_FILE: docker-compose.yml:docker-compose.ci.yml
+        run: pytest -m integration_cdc tests/integration/test_cdc_chain.py -v
+
+      - name: Collect container logs on failure
+        if: failure()
+        env:
+          COMPOSE_FILE: docker-compose.yml:docker-compose.ci.yml
+        run: docker compose logs --tail 200 > compose-logs.txt || true
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: cdc-compose-logs
+          path: compose-logs.txt
+          retention-days: 7
+          if-no-files-found: ignore
+
   bundle-static:
     # Structural validation of the Asset Bundle with no credentials and no network:
     # resolves include globs, checks notebook paths exist, and checks every
