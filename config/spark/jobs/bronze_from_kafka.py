@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 from common import configure_iceberg, checkpoint_path
 from payment_rules import mask_pii_fields
@@ -25,6 +26,19 @@ def main() -> None:
             SparkSession.builder.appName("bronze-from-kafka")
         )
         .getOrCreate()
+    )
+
+    # mask_pii_fields runs inside a Python UDF, so it executes in a worker process rather
+    # than the driver. While it was defined in this file cloudpickle serialized its body;
+    # imported from a module it serializes a reference instead, and the worker fails with
+    # ModuleNotFoundError because only the submitted script's directory is on the driver's
+    # path. addPyFile ships the module to the executors.
+    #
+    # Resolved next to this file so it works in every runtime: Compose bind-mounts the repo
+    # at /opt/project, and the Kubernetes Jobs mount the spark-jobs ConfigMap at the same
+    # path, with payment_rules.py alongside.
+    spark.sparkContext.addPyFile(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "payment_rules.py")
     )
 
     spark.sql("CREATE DATABASE IF NOT EXISTS iceberg.analytics")

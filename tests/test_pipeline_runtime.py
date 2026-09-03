@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import json
+import os
 import sys
 import types
 from pathlib import Path
@@ -223,12 +224,28 @@ class FakeReader:
 _current_fake_spark: "FakeSparkSession | None" = None
 
 
+class FakeSparkContext:
+    """Records addPyFile so the executor-shipping contract can be asserted.
+
+    bronze_from_kafka masks PII inside a Python UDF, which runs in a worker process. The
+    rule now lives in payment_rules, so cloudpickle serialises a reference rather than the
+    function body and the worker must be able to import it -- see the comment in the job.
+    """
+
+    def __init__(self) -> None:
+        self.py_files: list[str] = []
+
+    def addPyFile(self, path: str) -> None:
+        self.py_files.append(path)
+
+
 class FakeSparkSession:
     def __init__(self) -> None:
         self.frame = FakeFrame()
         self.read = FakeReader(self.frame)
         self.readStream = FakeStreamReader()
         self.sql_calls: list[str] = []
+        self.sparkContext = FakeSparkContext()
         self.stopped = False
 
     def stop(self) -> None:
@@ -522,6 +539,22 @@ def test_validate_connector_requests_the_configured_url(monkeypatch: pytest.Monk
 # _mask_pii_fields was extracted into config/spark/jobs/payment_rules.py. They live beside
 # the rule now, and cover more: every branch of the envelope handling, plus behavioural
 # equivalence with the copy inlined in databricks/src/dlt_pipeline.py.
+
+
+def test_bronze_ships_the_rules_module_to_executors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without this the UDF fails at runtime with ModuleNotFoundError, not at import.
+
+    The driver imports payment_rules fine -- spark-submit puts the script's directory on
+    its path. The Python worker does not, so the module has to be shipped explicitly.
+    Regressed once already, and only a real Spark run caught it.
+    """
+    module, spark, _ = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.bronze_from_kafka")
+    module.main()
+
+    shipped = spark.sparkContext.py_files
+    assert shipped, "bronze never called addPyFile; the masking UDF will fail on executors"
+    assert any(path.endswith("payment_rules.py") for path in shipped), shipped
+    assert all(os.path.isfile(path) for path in shipped), f"addPyFile given a bad path: {shipped}"
 
 
 def test_bronze_from_kafka_streams_to_iceberg(monkeypatch: pytest.MonkeyPatch) -> None:
