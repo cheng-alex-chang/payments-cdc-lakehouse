@@ -1,22 +1,29 @@
 # Spark with the medallion's dependency tree already resolved.
 #
-# The three Spark jobs submit with --packages, which resolves Iceberg, the AWS bundle,
-# hadoop-aws and the Kafka connector from Maven Central into spark.jars.ivy=/tmp/.ivy2.
-# That directory is pod-local, so under Kubernetes each of the three Jobs re-downloads
-# roughly 100MB on every run -- inside the cluster, where actions/cache cannot reach.
+# Not primarily for speed. Measured: baking the jars took the medallion step from 2.6 to
+# 2.3 minutes and added ~0.3 minutes to a cached image build, so on runner time it is
+# roughly a wash. The earlier 15-20 minute medallion runs that prompted this were
+# crash-loops, not downloads.
 #
-# Mounting a hostPath there does not work: kubelet creates a DirectoryOrCreate mount as
-# root:root 0755 while the Job runs as the image's UID 185, and Ivy dies with
-# "FileNotFoundException: /tmp/.ivy2/cache/resolved-...xml". Compose only gets away with
-# the equivalent because its spark service sets user: "0:0".
+# The reasons that hold up:
 #
-# So the cache is baked in instead. Resolution happens once at build time, into the exact
-# path the jobs already use, owned by the runtime user. The submit arguments are unchanged
-# -- --packages still appears, and still resolves the same tree; it simply finds every
-# artifact locally. That matters: the arguments are asserted byte-for-byte against
-# airflow/dags/spark_jobs.py and k8s/base/spark.yaml by tests/test_spark_jobs.py, and
-# dropping --packages in favour of dumping jars into $SPARK_HOME/jars would also lose the
-# transitive dependency resolution that --packages performs.
+# * Acceptance stops depending on Maven Central. Without this, every deployment gate
+#   re-resolves four coordinates and their transitive tree from the public internet, and a
+#   slow or unavailable repository fails the deploy rather than the code.
+# * The Spark runtime was the last component acceptance deployed that was not pinned by
+#   digest -- it pulled a mutable upstream tag while the other three images were promoted
+#   by sha256. Building it closes that hole in "build once, promote the same artifact".
+#
+# On the mechanism: a hostPath at spark.jars.ivy does not work. kubelet creates a
+# DirectoryOrCreate mount as root:root 0755 while the Job runs as the image's UID 185, so
+# Ivy fails with "FileNotFoundException: /tmp/.ivy2/cache/resolved-...xml" and the Job
+# crash-loops. Compose only gets away with the equivalent because its spark service sets
+# user: "0:0". Baking into the image sidesteps ownership entirely.
+#
+# The submit arguments are deliberately unchanged -- --packages still appears and still
+# resolves the same tree, it simply finds every artifact locally. Those arguments are
+# asserted byte-for-byte across three runtimes by tests/test_spark_jobs.py, and dumping
+# jars into $SPARK_HOME/jars instead would lose the transitive resolution --packages does.
 FROM spark:3.5.8-python3
 
 USER root

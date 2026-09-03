@@ -77,16 +77,18 @@ reproducible locally.
 exercises the orchestration contract the manifests already define instead of inventing a
 CI-only execution path.
 
-**Spark's dependencies are baked into an image, not cached at runtime.** The three Spark
-Jobs submit with `--packages`, which without help re-resolves ~100MB from Maven on every
-run, inside the cluster where `actions/cache` cannot reach. Mounting a hostPath at
-`spark.jars.ivy` looks like the fix and is not: kubelet creates a `DirectoryOrCreate`
-hostPath as `root:root 0755` while the Job runs as the image's UID 185, so Ivy dies with
-`FileNotFoundException: /tmp/.ivy2/cache/resolved-...xml` and the Job crash-loops. Compose
-only gets away with it because its `spark` service sets `user: "0:0"`. So
-`config/spark/Dockerfile` resolves the tree at build time into the path the jobs already
-use, owned by the runtime user. The submit arguments are unchanged — `--packages` still
-resolves the same tree, it just finds every artifact locally.
+**Spark's dependencies are baked into an image — for supply-chain reasons, not speed.**
+Measured, baking took the medallion step from 2.6 to 2.3 minutes and added ~0.3 minutes to
+a cached build: roughly a wash. What it does buy is that acceptance no longer re-resolves
+four Maven coordinates and their transitive tree from the public internet on every run, so
+a slow or unavailable Maven Central can no longer fail the deploy gate — and the Spark
+runtime stops being the one component acceptance deployed from a mutable upstream tag while
+the other three were promoted by digest.
+
+Mounting a hostPath at `spark.jars.ivy` is the obvious alternative and does not work:
+kubelet creates a `DirectoryOrCreate` hostPath as `root:root 0755` while the Job runs as
+the image's UID 185, so Ivy dies with `FileNotFoundException` and the Job crash-loops.
+Compose only gets away with it because its `spark` service sets `user: "0:0"`.
 
 **Resources are not trimmed for CI.** Always-on workloads request 4.6Gi and the Jobs run
 one at a time, so peak is ~5.6Gi on a 16GB runner — not the 8.1Gi that summing every
