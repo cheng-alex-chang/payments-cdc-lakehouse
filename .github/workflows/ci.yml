@@ -131,6 +131,91 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # Whether this run may publish to GHCR. A fork PR's GITHUB_TOKEN is read-only, so it
+  # gets no packages: write and cannot push. Computed once here so the trust decision is
+  # visible in one place rather than repeated in every downstream `if:`.
+  trust:
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.check.outputs.publish }}
+    steps:
+      - id: check
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ] \
+             || [ "${{ github.event.pull_request.head.repo.full_name }}" = "${{ github.repository }}" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "Trusted trigger: images will be published to GHCR."
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Fork pull request: images are built but not published, and k8s acceptance is skipped."
+          fi
+
+  # The three images this repo actually builds. Spark is deliberately absent: it runs on
+  # upstream spark:3.5.8-python3 with jobs submitted as loose .py files.
+  build:
+    needs: [coverage-gate, trust]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: payments-api
+            dockerfile: config/api/Dockerfile
+            context: .
+          - image: data-pipeline-airflow
+            dockerfile: config/airflow/Dockerfile
+            context: .
+          - image: trino-exporter
+            dockerfile: config/trino-exporter/Dockerfile
+            context: config/trino-exporter
+    uses: ./.github/workflows/_docker-build.yml
+    with:
+      image: ${{ matrix.image }}
+      dockerfile: ${{ matrix.dockerfile }}
+      context: ${{ matrix.context }}
+      push: ${{ needs.trust.outputs.publish == 'true' }}
+
+  # Merges the per-image digest artifacts into one manifest that Phase 5 consumes to pin
+  # the CI overlay's images by digest.
+  digest-manifest:
+    needs: [build, trust]
+    if: needs.trust.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Merge digests
+        run: |
+          python3 - <<'PY'
+          import glob
+          import json
+
+          files = sorted(glob.glob("digest-*.json"))
+          if len(files) != 3:
+              raise SystemExit(f"expected 3 digest files, found {len(files)}: {files}")
+
+          manifest = {}
+          for path in files:
+              with open(path, encoding="utf-8") as handle:
+                  entry = json.load(handle)
+              if not entry["digest"].startswith("sha256:"):
+                  raise SystemExit(f"{path}: missing or malformed digest")
+              manifest[entry["image"]] = entry
+
+          with open("images.json", "w", encoding="utf-8") as handle:
+              json.dump(manifest, handle, indent=2, sort_keys=True)
+          print(json.dumps(manifest, indent=2, sort_keys=True))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-manifest
+          path: images.json
+          retention-days: 1
+          if-no-files-found: error
+
   bundle-static:
     # Structural validation of the Asset Bundle with no credentials and no network:
     # resolves include globs, checks notebook paths exist, and checks every
