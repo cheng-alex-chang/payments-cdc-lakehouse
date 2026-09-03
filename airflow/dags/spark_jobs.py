@@ -17,7 +17,10 @@ from __future__ import annotations
 import os
 from typing import Any
 
-SPARK_IMAGE = "spark:3.5.8-python3"
+# Built from config/spark/Dockerfile: upstream spark:3.5.8-python3 with the medallion's
+# --packages tree already resolved into /tmp/.ivy2, so the three Jobs do not each re-download
+# it from Maven. See the Dockerfile for why a hostPath cache does not work here.
+SPARK_IMAGE = "local/payments-spark:dev"
 JOBS_DIR = "/opt/project/config/spark/jobs"
 
 # iceberg-aws-bundle carries the AWS SDK v2 that S3FileIO uses. hadoop-aws is still needed for

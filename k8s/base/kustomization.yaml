@@ -80,6 +80,7 @@ configMapGenerator:
       - silver_payments.py=../../config/spark/jobs/silver_payments.py
       - gold_metrics.py=../../config/spark/jobs/gold_metrics.py
       - common.py=../../config/spark/jobs/common.py
+      - payment_rules.py=../../config/spark/jobs/payment_rules.py
   # payments_pipeline.py does `from alerts import notify_failure`, so alerts.py has to ship
   # alongside it or the DagFileProcessor fails to import the DAG. snowflake_fx_etl.py is
   # deliberately excluded: it imports SnowflakeOperator and snowflake_etl.src, neither of which

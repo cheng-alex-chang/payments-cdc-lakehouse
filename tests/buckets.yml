@@ -35,6 +35,7 @@ buckets:
 
   spark:
     paths:
+      - tests/test_payment_rules.py
       - tests/test_spark_jobs.py
       - tests/test_transforms.py
 

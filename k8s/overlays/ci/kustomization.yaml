@@ -43,21 +43,18 @@ secretGenerator:
     envs:
       - secrets.env
 
-# On caching Spark's Ivy directory here: don't, at least not this way. The three Spark
-# Jobs each re-resolve ~100MB from Maven Central because spark.jars.ivy=/tmp/.ivy2 is
-# pod-local, and mounting a hostPath there looks like the obvious fix. It is not: kubelet
-# creates a DirectoryOrCreate hostPath as root:root 0755, while the Spark Job runs as the
-# image's default UID 185, so Ivy fails with
+# On mounting a hostPath at Spark's Ivy directory: don't. kubelet creates a
+# DirectoryOrCreate hostPath as root:root 0755 while the Spark Job runs as the image's
+# default UID 185, so Ivy fails with
 #
-#   FileNotFoundException: /tmp/.ivy2/cache/resolved-...xml (No such file or directory)
+#   FileNotFoundException: /tmp/.ivy2/cache/resolved-...xml
 #
-# and the Job crash-loops until the wait times out. Compose gets away with a bind mount
-# only because its spark service sets `user: "0:0"`.
+# and the Job crash-loops until the wait times out. Compose only gets away with the
+# equivalent because its spark service sets `user: "0:0"`.
 #
-# Making it work needs either a root initContainer to chown the mount or runAsUser: 0 on
-# the Jobs -- complexity in the acceptance path to save a few minutes. The real fix is
-# baking the jars into a Spark image, which removes the download from both runtimes; see
-# docs/ci-cd.md. Until then the Jobs pay the download, which is slow but correct.
+# The jars are baked into the payments-spark image instead -- resolved once at build time
+# into the same path, owned by the runtime user. See config/spark/Dockerfile.
+
 patches:
   - path: imagepullsecret-patch.yaml
     target:

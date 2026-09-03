@@ -11,7 +11,7 @@ otherwise:
 
 | Track | Workloads | Artifact | Target |
 |---|---|---|---|
-| **Lakehouse** | Spark, API, Airflow, Kafka/Debezium, Iceberg, Trino | Docker images | Ephemeral kind |
+| **Lakehouse** | Spark, API, Airflow, Kafka/Debezium, Iceberg, Trino | Docker images (4) | Ephemeral kind |
 | **Cloud analytics** | DLT pipeline, Snowflake, dbt | A repo revision | Databricks + Snowflake |
 
 They implement related logic but run different workloads and ship different artifacts.
@@ -77,14 +77,18 @@ reproducible locally.
 exercises the orchestration contract the manifests already define instead of inventing a
 CI-only execution path.
 
-**Spark's Ivy cache is not shared in the kind acceptance cluster.** Mounting a hostPath at
-`spark.jars.ivy` looks like the obvious way to avoid three ~100MB Maven resolutions, and it
-fails: kubelet creates a `DirectoryOrCreate` hostPath as `root:root 0755` while the Spark
-Job runs as the image's default UID 185, so Ivy dies with `FileNotFoundException:
-/tmp/.ivy2/cache/resolved-...xml` and the Job crash-loops. Compose gets away with a bind
-mount only because its `spark` service sets `user: "0:0"`. The real fix is baking the jars
-into a Spark image, which removes the download from both runtimes; until then the Jobs pay
-it.
+**Spark's dependencies are baked into an image — for supply-chain reasons, not speed.**
+Measured, baking took the medallion step from 2.6 to 2.3 minutes and added ~0.3 minutes to
+a cached build: roughly a wash. What it does buy is that acceptance no longer re-resolves
+four Maven coordinates and their transitive tree from the public internet on every run, so
+a slow or unavailable Maven Central can no longer fail the deploy gate — and the Spark
+runtime stops being the one component acceptance deployed from a mutable upstream tag while
+the other three were promoted by digest.
+
+Mounting a hostPath at `spark.jars.ivy` is the obvious alternative and does not work:
+kubelet creates a `DirectoryOrCreate` hostPath as `root:root 0755` while the Job runs as
+the image's UID 185, so Ivy dies with `FileNotFoundException` and the Job crash-loops.
+Compose only gets away with it because its `spark` service sets `user: "0:0"`.
 
 **Resources are not trimmed for CI.** Always-on workloads request 4.6Gi and the Jobs run
 one at a time, so peak is ~5.6Gi on a 16GB runner — not the 8.1Gi that summing every

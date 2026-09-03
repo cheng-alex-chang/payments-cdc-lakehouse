@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
+import os
 
 from common import configure_iceberg, checkpoint_path
+from payment_rules import mask_pii_fields
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, udf
 from pyspark.sql.types import StringType
@@ -15,28 +15,8 @@ KAFKA_TOPIC     = "cdc.public.payments"
 BRONZE_TABLE    = "iceberg.analytics.payments_bronze"
 CHECKPOINT_PATH = checkpoint_path("bronze")
 
-# Fields hashed before writing to Bronze so PII never lands in the lakehouse.
-PII_FIELDS = {"shopper_id"}
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
 LOGGER = logging.getLogger(__name__)
-
-
-def _mask_pii_fields(value: str | None) -> str | None:
-    """Hash PII fields in both `before` and `after` sections of a Debezium envelope."""
-    if value is None:
-        return None
-    try:
-        envelope = json.loads(value)
-        for section in ("before", "after"):
-            if isinstance(envelope.get(section), dict):
-                for field in PII_FIELDS:
-                    if field in envelope[section] and envelope[section][field] is not None:
-                        raw = str(envelope[section][field]).encode()
-                        envelope[section][field] = hashlib.sha256(raw).hexdigest()
-        return json.dumps(envelope)
-    except (json.JSONDecodeError, TypeError):
-        return value
 
 
 def main() -> None:
@@ -46,6 +26,19 @@ def main() -> None:
             SparkSession.builder.appName("bronze-from-kafka")
         )
         .getOrCreate()
+    )
+
+    # mask_pii_fields runs inside a Python UDF, so it executes in a worker process rather
+    # than the driver. While it was defined in this file cloudpickle serialized its body;
+    # imported from a module it serializes a reference instead, and the worker fails with
+    # ModuleNotFoundError because only the submitted script's directory is on the driver's
+    # path. addPyFile ships the module to the executors.
+    #
+    # Resolved next to this file so it works in every runtime: Compose bind-mounts the repo
+    # at /opt/project, and the Kubernetes Jobs mount the spark-jobs ConfigMap at the same
+    # path, with payment_rules.py alongside.
+    spark.sparkContext.addPyFile(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "payment_rules.py")
     )
 
     spark.sql("CREATE DATABASE IF NOT EXISTS iceberg.analytics")
@@ -62,7 +55,7 @@ def main() -> None:
         PARTITIONED BY (days(kafka_timestamp))
     """)
 
-    mask_udf = udf(_mask_pii_fields, StringType())
+    mask_udf = udf(mask_pii_fields, StringType())
 
     stream = (
         spark.readStream

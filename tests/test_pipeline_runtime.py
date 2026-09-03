@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import json
+import os
 import sys
 import types
 from pathlib import Path
@@ -223,12 +224,28 @@ class FakeReader:
 _current_fake_spark: "FakeSparkSession | None" = None
 
 
+class FakeSparkContext:
+    """Records addPyFile so the executor-shipping contract can be asserted.
+
+    bronze_from_kafka masks PII inside a Python UDF, which runs in a worker process. The
+    rule now lives in payment_rules, so cloudpickle serialises a reference rather than the
+    function body and the worker must be able to import it -- see the comment in the job.
+    """
+
+    def __init__(self) -> None:
+        self.py_files: list[str] = []
+
+    def addPyFile(self, path: str) -> None:
+        self.py_files.append(path)
+
+
 class FakeSparkSession:
     def __init__(self) -> None:
         self.frame = FakeFrame()
         self.read = FakeReader(self.frame)
         self.readStream = FakeStreamReader()
         self.sql_calls: list[str] = []
+        self.sparkContext = FakeSparkContext()
         self.stopped = False
 
     def stop(self) -> None:
@@ -518,52 +535,26 @@ def test_validate_connector_requests_the_configured_url(monkeypatch: pytest.Monk
 # bronze job
 # ---------------------------------------------------------------------------
 
-def test_mask_pii_fields_hashes_shopper_id_in_after(monkeypatch: pytest.MonkeyPatch) -> None:
-    module, _, _ = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.bronze_from_kafka")
-    payload = json.dumps({"after": {"payment_id": "p1", "shopper_id": "user-123"}, "op": "c"})
-    result = json.loads(module._mask_pii_fields(payload))
-    assert result["after"]["shopper_id"] != "user-123"
-    assert len(result["after"]["shopper_id"]) == 64  # SHA-256 hex digest
-    assert result["after"]["payment_id"] == "p1"
+# The masking tests that lived here moved to tests/test_payment_rules.py when
+# _mask_pii_fields was extracted into config/spark/jobs/payment_rules.py. They live beside
+# the rule now, and cover more: every branch of the envelope handling, plus behavioural
+# equivalence with the copy inlined in databricks/src/dlt_pipeline.py.
 
 
-def test_mask_pii_fields_hashes_shopper_id_in_before(monkeypatch: pytest.MonkeyPatch) -> None:
-    module, _, _ = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.bronze_from_kafka")
-    payload = json.dumps({"before": {"payment_id": "p1", "shopper_id": "user-123"}, "after": None, "op": "d"})
-    result = json.loads(module._mask_pii_fields(payload))
-    assert result["before"]["shopper_id"] != "user-123"
-    assert len(result["before"]["shopper_id"]) == 64
+def test_bronze_ships_the_rules_module_to_executors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without this the UDF fails at runtime with ModuleNotFoundError, not at import.
 
+    The driver imports payment_rules fine -- spark-submit puts the script's directory on
+    its path. The Python worker does not, so the module has to be shipped explicitly.
+    Regressed once already, and only a real Spark run caught it.
+    """
+    module, spark, _ = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.bronze_from_kafka")
+    module.main()
 
-def test_mask_pii_fields_is_deterministic(monkeypatch: pytest.MonkeyPatch) -> None:
-    module, _, _ = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.bronze_from_kafka")
-    payload = json.dumps({"after": {"shopper_id": "user-123"}, "op": "c"})
-    first = json.loads(module._mask_pii_fields(payload))["after"]["shopper_id"]
-    second = json.loads(module._mask_pii_fields(payload))["after"]["shopper_id"]
-    assert first == second
-
-
-def test_mask_pii_fields_returns_none_for_null_input(monkeypatch: pytest.MonkeyPatch) -> None:
-    module, _, _ = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.bronze_from_kafka")
-    assert module._mask_pii_fields(None) is None
-
-
-def test_mask_pii_fields_passes_through_malformed_json(monkeypatch: pytest.MonkeyPatch) -> None:
-    module, _, _ = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.bronze_from_kafka")
-    bad = "not-json"
-    assert module._mask_pii_fields(bad) == bad
-
-
-def test_mask_pii_fields_skips_envelope_without_pii(monkeypatch: pytest.MonkeyPatch) -> None:
-    module, _, _ = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.bronze_from_kafka")
-    payload = json.dumps({"after": {"payment_id": "p1", "amount": "99.00"}, "op": "c"})
-    result = json.loads(module._mask_pii_fields(payload))
-    assert result["after"] == {"payment_id": "p1", "amount": "99.00"}
-
-
-# ---------------------------------------------------------------------------
-# bronze job
-# ---------------------------------------------------------------------------
+    shipped = spark.sparkContext.py_files
+    assert shipped, "bronze never called addPyFile; the masking UDF will fail on executors"
+    assert any(path.endswith("payment_rules.py") for path in shipped), shipped
+    assert all(os.path.isfile(path) for path in shipped), f"addPyFile given a bad path: {shipped}"
 
 
 def test_bronze_from_kafka_streams_to_iceberg(monkeypatch: pytest.MonkeyPatch) -> None:

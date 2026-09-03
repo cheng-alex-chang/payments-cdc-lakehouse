@@ -86,16 +86,13 @@ def test_an_empty_warehouse_fails_the_run(monkeypatch):
         acceptance_checks.main()
 
 
-def test_canonical_sets_match_the_silver_transform():
-    """silver_payments.py is what produces these values; drift would make the check lie."""
-    source = (
-        acceptance_checks.__file__.replace("scripts/acceptance_checks.py", "")
-        + "config/spark/jobs/silver_payments.py"
-    )
-    with open(source, encoding="utf-8") as handle:
-        text = handle.read()
+def test_canonical_sets_match_the_shared_payment_rules():
+    """config/spark/jobs/payment_rules.py is the source of truth for these values.
 
-    for method in acceptance_checks.ALLOWED_METHODS:
-        assert f'"{method}"' in text, f"{method} is not in silver_payments.py"
-    for status in acceptance_checks.ALLOWED_STATUSES:
-        assert f'"{status}"' in text, f"{status} is not in silver_payments.py"
+    The DQ check asserts silver contains nothing outside them, so if the two lists drift
+    the check either passes on bad data or fails on good data.
+    """
+    import payment_rules
+
+    assert tuple(acceptance_checks.ALLOWED_METHODS) == payment_rules.ALLOWED_PAYMENT_METHODS
+    assert tuple(acceptance_checks.ALLOWED_STATUSES) == payment_rules.ALLOWED_PAYMENT_STATUSES

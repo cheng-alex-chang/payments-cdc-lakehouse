@@ -160,3 +160,73 @@ def test_rbac_grants_pod_log_access_for_streaming_task_logs() -> None:
     resources = {resource for rule in rules for resource in rule["resources"]}
     assert "pods" in resources
     assert "pods/log" in resources
+
+
+# ---------------------------------------------------------------------------
+# the Spark image
+# ---------------------------------------------------------------------------
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def test_every_runtime_names_the_same_spark_image() -> None:
+    """The image is written in five places; nothing but this test keeps them equal.
+
+    A Compose service or one of the three Kubernetes Jobs left on the old tag would run
+    the medallion against an image without the pre-resolved jars -- correct, but silently
+    back to downloading 100MB per Job.
+    """
+    root = _repo_root()
+    image = spark_jobs.SPARK_IMAGE
+
+    compose = yaml.safe_load((root / "docker-compose.yml").read_text(encoding="utf-8"))
+    assert compose["services"]["spark"]["image"] == image
+
+    k8s = list(yaml.safe_load_all((root / "k8s" / "base" / "spark.yaml").read_text(encoding="utf-8")))
+    job_images = [
+        container["image"]
+        for doc in k8s
+        if doc and doc.get("kind") == "Job"
+        for container in doc["spec"]["template"]["spec"]["containers"]
+    ]
+    assert job_images == [image] * 3, f"k8s Spark Jobs use {set(job_images)}, expected {image}"
+
+    up = (root / "scripts" / "k8s_up.sh").read_text(encoding="utf-8")
+    assert f"docker build -t {image}" in up, "k8s_up.sh does not build the image"
+    assert f"kind load docker-image {image}" in up, "k8s_up.sh does not load it into kind"
+
+
+def test_compose_builds_the_spark_image_from_its_dockerfile() -> None:
+    """Without a build stanza, Compose would pull a tag that exists only locally."""
+    root = _repo_root()
+    compose = yaml.safe_load((root / "docker-compose.yml").read_text(encoding="utf-8"))
+    build = compose["services"]["spark"]["build"]
+    assert build["dockerfile"] == "config/spark/Dockerfile"
+    assert (root / build["dockerfile"]).is_file()
+
+
+def test_image_warms_exactly_the_packages_the_jobs_request() -> None:
+    """A coordinate the image did not warm is fetched at runtime, defeating the point.
+
+    One it warmed but no job asks for is dead weight in the layer. Both are silent, so
+    the Dockerfile's ARG is compared against the job definitions rather than trusted.
+    """
+    root = _repo_root()
+    dockerfile = (root / "config" / "spark" / "Dockerfile").read_text(encoding="utf-8")
+
+    declared = next(
+        line.split("=", 1)[1].strip().strip('"')
+        for line in dockerfile.splitlines()
+        if line.startswith("ARG SPARK_PACKAGES=")
+    )
+    warmed = set(declared.split(","))
+
+    requested: set[str] = set()
+    for job in spark_jobs.JOBS.values():
+        requested.update(job["packages"].split(","))
+
+    assert warmed == requested, (
+        f"config/spark/Dockerfile warms {sorted(warmed)} but the jobs request "
+        f"{sorted(requested)}"
+    )
