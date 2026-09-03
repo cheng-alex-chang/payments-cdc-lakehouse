@@ -6,6 +6,18 @@ on:
   pull_request:
     branches: [main]
 
+# Least privilege by default. Jobs that need more (packages: write for GHCR,
+# id-token: write for OIDC) opt in individually as those stages land.
+permissions:
+  contents: read
+
+# A PR that gets a second push should not keep spending runners on the first commit.
+# Note this does not deduplicate triggers: push is scoped to main and pull_request to
+# PRs targeting main, so a feature-branch commit already fires exactly once.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -37,8 +49,11 @@ jobs:
 
       # api/src is covered here without installing the Trino driver: trino_client imports it
       # lazily inside connect_from_env, so every API test runs against a fake DBAPI connection.
+      # airflow/dags is listed to match .coveragerc -- without it CI and a local `pytest --cov`
+      # measure different code against the same 80% gate.
       - run: >-
           pytest
+          --cov=airflow/dags
           --cov=config/spark/jobs
           --cov=scripts
           --cov=databricks/src/common.py
@@ -47,10 +62,32 @@ jobs:
           --cov-report=term-missing
           --cov-fail-under=80
 
-  bundle:
-    # Validates the Databricks Asset Bundle. The validate step runs only when the
-    # DATABRICKS_HOST / DATABRICKS_TOKEN repo secrets are set, so the job stays
-    # green out-of-the-box and becomes a real check once you add credentials.
+  bundle-static:
+    # Structural validation of the Asset Bundle with no credentials and no network:
+    # resolves include globs, checks notebook paths exist, and checks every
+    # ${resources.*} reference names a declared resource. Safe on fork PRs, where
+    # secrets are unavailable -- which is exactly why the authenticated check below
+    # cannot run on every trigger.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+
+      - run: pip install -r requirements-ci.txt
+
+      - run: python scripts/validate_databricks_bundle.py
+
+  bundle-authenticated:
+    # `databricks bundle validate` authenticates: the dev target is mode: development,
+    # which resolves workspace identity to prefix resources. So it runs only on main,
+    # where secrets are available -- and it FAILS when they are missing rather than
+    # reporting a green check that never ran.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     env:
       DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
@@ -60,8 +97,18 @@ jobs:
 
       - uses: databricks/setup-cli@v1.9.0
 
+      - name: Require credentials
+        run: |
+          missing=()
+          [ -n "${DATABRICKS_HOST}"  ] || missing+=(DATABRICKS_HOST)
+          [ -n "${DATABRICKS_TOKEN}" ] || missing+=(DATABRICKS_TOKEN)
+          if [ ${#missing[@]} -ne 0 ]; then
+            echo "::error::Missing required secret(s): ${missing[*]}" >&2
+            echo "Set them in repo settings; this check is not allowed to pass unconfigured." >&2
+            exit 1
+          fi
+
       - name: Validate bundle
-        if: env.DATABRICKS_HOST != ''
         working-directory: databricks
         run: databricks bundle validate -t dev
 
