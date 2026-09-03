@@ -47,12 +47,10 @@ so gating one on the other would cost minutes for nothing.
 | `ci.yml` | Everything on a PR: validate, test, build, CDC, acceptance |
 | `release-cloud.yml` | **Manual only** (see below): Databricks, Snowflake, dbt, behind approval |
 | `security.yml` | CodeQL, Trivy, pip-audit, gitleaks; also weekly |
-| `_python-tests.yml` | Reusable: one test bucket |
-| `_docker-build.yml` | Reusable: build, publish, record digest |
-| `_deploy-k8s.yml` | Reusable: kind acceptance |
 
-GitHub Actions does not process subdirectories under `.github/workflows/`, so reusable
-workflows live alongside the rest with a `_` prefix.
+The three reusable workflows now live in
+[`cheng-alex-chang/platform-ci`](https://github.com/cheng-alex-chang/platform-ci), pinned
+at `@v1`: `python-tests.yml`, `docker-build.yml`, `k8s-acceptance.yml`.
 
 ## Decisions worth knowing
 
@@ -184,21 +182,26 @@ coverage combine && coverage report --fail-under=80
 
 ## The pod model
 
-The three `_*.yml` workflows are written to be repo-agnostic and are the intended
-extraction point:
+The mechanics of the three expensive stages live in
+[`cheng-alex-chang/platform-ci`](https://github.com/cheng-alex-chang/platform-ci) and are
+consumed at `@v1`:
 
 ```
-org/platform-ci/.github/workflows/python-tests.yml@v1
-org/platform-ci/.github/workflows/docker-build.yml@v1
-org/platform-ci/.github/workflows/k8s-acceptance.yml@v1
+cheng-alex-chang/platform-ci/.github/workflows/python-tests.yml@v1
+cheng-alex-chang/platform-ci/.github/workflows/docker-build.yml@v1
+cheng-alex-chang/platform-ci/.github/workflows/k8s-acceptance.yml@v1
 ```
 
-Same-repository reusable workflows are factoring. Moving them to a separate versioned
-repository is what turns the pattern into centralized platform standards with
-decentralized pod ownership: the platform team owns the templates and their release
-cadence, and the payments pod owns which versions it consumes, its own test buckets,
-manifests, and deployment configuration.
+`actions/checkout` inside those workflows resolves against the **calling** repository at the
+calling commit, so `requirements-ci.txt`, `k8s/overlays/ci` and `scripts/k8s_verify.sh` stay
+this repo's business. That is the split: the platform owns how a stage runs, the pod owns
+what it runs against, its own buckets, manifests and deployment configuration, and which
+version it consumes.
 
-Until that repository exists, the split is structural rather than organizational — worth
-being clear about, since the directory layout alone can look like more separation than it
-actually provides.
+Same-repository reusable workflows were only factoring. Pinning a versioned external
+reference is what makes the ownership real — the pod upgrades when it chooses rather than
+inheriting whatever the platform merged.
+
+Worth stating plainly: there is one consumer today, so this is largely a demonstration of
+the model. The pattern earns its keep with several pods sharing the mechanics; with one it
+costs a second repository to keep in step.
