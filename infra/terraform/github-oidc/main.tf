@@ -102,9 +102,19 @@ data "aws_iam_policy_document" "ci_terraform" {
   statement {
     sid    = "LakeBucket"
     effect = "Allow"
+    # GetBucket* does not cover every read the AWS provider makes when refreshing an
+    # aws_s3_bucket: accelerate configuration, for one, is s3:GetAccelerateConfiguration --
+    # a differently-named action, not a GetBucket* variant. The release apply failed on
+    # exactly that. These are the reads a bucket refresh performs, named explicitly.
     actions = [
       "s3:CreateBucket", "s3:DeleteBucket", "s3:ListBucket",
       "s3:GetBucket*", "s3:PutBucket*", "s3:GetObject", "s3:PutObject", "s3:DeleteObject",
+      "s3:GetAccelerateConfiguration", "s3:PutAccelerateConfiguration",
+      "s3:GetEncryptionConfiguration", "s3:PutEncryptionConfiguration",
+      "s3:GetLifecycleConfiguration", "s3:PutLifecycleConfiguration",
+      "s3:GetReplicationConfiguration", "s3:GetBucketObjectLockConfiguration",
+      "s3:GetAnalyticsConfiguration", "s3:GetMetricsConfiguration",
+      "s3:GetInventoryConfiguration", "s3:GetIntelligentTieringConfiguration",
     ]
     resources = [
       "arn:aws:s3:::${var.lake_bucket}",

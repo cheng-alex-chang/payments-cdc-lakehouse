@@ -66,6 +66,12 @@ jobs:
       SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
       SNOWFLAKE_AUTHENTICATOR: SNOWFLAKE_JWT
       SNOWFLAKE_PRIVATE_KEY_PATH: ${{ github.workspace }}/.snowflake_key.p8
+      # Terraform inputs that have no safe default. s3_bucket unset used to mean
+      # "repoint the external stage at payments-lake-changeme"; etl_role_users unset used to
+      # mean "destroy the grant the pipeline authenticates with". Both variables now fail
+      # closed, and both are supplied here so the workflow is the only place they live.
+      TF_VAR_s3_bucket: ${{ vars.LAKE_S3_BUCKET }}
+      TF_VAR_etl_role_users: '["${{ secrets.SNOWFLAKE_USER }}"]'
     steps:
       - uses: actions/checkout@v7
 
@@ -194,6 +200,12 @@ jobs:
       SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
       SNOWFLAKE_AUTHENTICATOR: SNOWFLAKE_JWT
       SNOWFLAKE_PRIVATE_KEY_PATH: ${{ github.workspace }}/.snowflake_key.p8
+      # Terraform inputs that have no safe default. s3_bucket unset used to mean
+      # "repoint the external stage at payments-lake-changeme"; etl_role_users unset used to
+      # mean "destroy the grant the pipeline authenticates with". Both variables now fail
+      # closed, and both are supplied here so the workflow is the only place they live.
+      TF_VAR_s3_bucket: ${{ vars.LAKE_S3_BUCKET }}
+      TF_VAR_etl_role_users: '["${{ secrets.SNOWFLAKE_USER }}"]'
     steps:
       - uses: actions/checkout@v7
 
