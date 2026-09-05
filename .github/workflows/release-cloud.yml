@@ -7,24 +7,39 @@
 # chain would make "promote the same artifact" a lie, since this track has no image.
 name: Cloud release
 
-# Manual only, deliberately.
+# Dispatch by hand, or automatically when a cloud asset actually changes.
 #
-# This track needs a live Snowflake account (the rehearsal's dbt build, and the
-# Snowflake Terraform plan, which reads account state) and a Databricks workspace
-# separate from dev. Neither exists today: the Snowflake trial has expired, and
-# Databricks Free Edition provides a single workspace, so `bundle deploy -t prod`
-# would deploy into the same workspace dev already occupies -- mode: production drops
-# the per-user prefixing dev relies on.
+# Both blockers this workflow was pinned for are gone: there is a live Snowflake account,
+# and the Databricks targets no longer collide (they separate on schema, not workspace).
+# A dispatched run has since gone green end to end, unattended.
 #
-# Firing on every merge therefore guaranteed a red main while deploying nothing: the
-# run died at credential loading, before the approval gate. Nothing is lost by making
-# it manual, because ci.yml's bundle-authenticated job already validates the Databricks
-# bundle on every push to main -- the only part of this workflow that can currently run.
+# The path filter is the part worth explaining. Firing on every push to main would deploy
+# production on a docs typo -- and this release is not a cheap no-op, it is a Terraform
+# apply against two clouds plus a full dbt build into ANALYTICS. Every apply is another
+# chance to meet state drift. Dependabot merges to main regularly and would deploy each
+# time. And when the Snowflake trial lapses, an unfiltered trigger turns every merge red
+# while deploying nothing, which is precisely the failure this workflow was made manual to
+# escape. Scoping to the paths that change what is deployed keeps the drift protection
+# without any of that.
 #
-# Restore `push: branches: [main]` when there is a Snowflake account to rehearse
-# against and a workspace worth promoting into.
+# The approval gate is off: the prod environment no longer requires a reviewer. That is
+# only defensible because the Terraform inputs fail closed. They did not always -- an
+# earlier approved run planned `1 to destroy` on the grant the pipeline authenticates with
+# and would have repointed the external stage at a placeholder bucket, having fallen back
+# to defaults the workflow never supplied. It failed on an unrelated missing IAM
+# permission, which was luck rather than a safeguard. s3_bucket and etl_role_users now
+# have no defaults at all, so a missing value stops the run. If that ever regresses, put
+# the reviewer back before touching this trigger.
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "infra/terraform/**"
+      - "databricks/**"
+      - "snowflake_etl/dbt/**"
+      - "snowflake_etl/src/**"
+      - ".github/workflows/release-cloud.yml"
 
 permissions:
   contents: read
