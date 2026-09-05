@@ -74,4 +74,5 @@ buckets:
       - tests/test_trino_http.py
       - tests/test_validate_databricks_bundle.py
       - tests/test_validate_k8s_manifests.py
+      - tests/test_terraform_inputs.py
       - tests/test_validate_schema.py

@@ -29,9 +29,15 @@ variable "etl_role" {
 }
 
 variable "s3_bucket" {
-  description = "Globally-unique S3 bucket name for the raw lake. Override per account."
+  description = <<-EOT
+    Globally-unique S3 bucket name for the raw lake. REQUIRED -- no default on purpose.
+
+    It used to default to "payments-lake-changeme". Unset, that is not a harmless
+    placeholder: Terraform plans to repoint the storage integration and the external stage
+    at a bucket that does not exist, so COPY INTO starts failing against a live warehouse.
+    An unattended apply would do it silently. A missing value must stop the run instead.
+  EOT
   type        = string
-  default     = "payments-lake-changeme"
 }
 
 variable "stage_name" {
@@ -54,5 +60,7 @@ variable "etl_role_users" {
     functional role is only half the job; it has to reach a principal.
   EOT
   type        = list(string)
-  default     = []
+  # No default. An empty list is a valid *intent* ("grant to nobody") and therefore
+  # indistinguishable from a forgotten variable -- and Terraform then plans to DESTROY the
+  # grant the pipeline authenticates with. Pass [] explicitly if that is really what you mean.
 }
