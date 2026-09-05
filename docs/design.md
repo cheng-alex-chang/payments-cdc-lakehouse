@@ -28,7 +28,7 @@ Postgres (OLTP)
 
 ### Silver
 - **Source:** Bronze Iceberg table (Iceberg streaming source)
-- **Pattern:** Streaming `foreachBatch` → dedup by `payment_id` (latest `updated_at`, tiebroken by `kafka_offset`) → `MERGE INTO` for inserts/updates, `DELETE FROM` for Debezium `op=d`
+- **Pattern:** Streaming `foreachBatch` → project all four CDC ops into one change set → dedup by `payment_id` (highest `source_lsn`, tiebroken by `kafka_offset`) → a single sequenced `MERGE INTO` that inserts, updates and deletes
 - **Schema:** Canonical payment record — typed, normalised text fields, exact-precision `DECIMAL(12,2)` amount, timestamps in microseconds converted to `TIMESTAMP`
 - **Partitioned by:** `days(created_at)`
 - **Replay safety:** Multiple CDC events per key in the same batch (replay from earliest offset, back-to-back updates) collapse to the latest version before MERGE, so reruns converge to the same current state as an incremental run
@@ -37,7 +37,13 @@ Postgres (OLTP)
 ### Gold
 - **Source:** Silver Iceberg table only — gold reads nothing from bronze (strictly linear `bronze → silver → gold` lineage; the raw Debezium envelope is fully encapsulated by silver)
 - **Pattern:** Batch `INSERT OVERWRITE` — a single `GROUP BY` aggregation over the current silver table that atomically replaces every gold row
-- **Schema:** Hourly aggregates per `country_code` and `payment_method` — `payment_count`, exact-precision `gross_volume`, `auth_rate`
+- **Schema:** Hourly aggregates per `country_code` and `payment_method` — `payment_count`, exact-precision `gross_volume` and `authorized_volume`, `auth_rate`
+- **Metric definitions** (the SQL was always valid; what was missing was saying what it means):
+  - `gross_volume` — total **attempted** payment amount, across every `payment_status`: authorized, failed, cancelled, pending, refunded, chargeback. $100 authorized + $200 failed + $300 cancelled = **$600**.
+  - `authorized_volume` — the subset whose status is `authorized`. **$100** in that example.
+  - `auth_rate` — authorized count ÷ attempted count, at the group's grain.
+  - These are **current-state, not lifecycle**: silver holds one row per payment at its latest version, so a payment now sitting at `refunded` still contributes to `gross_volume`, and `authorized_volume` means authorized *now* — not every payment ever authorized. "Ever-authorized volume" needs event history and cannot be derived from silver.
+  - Neither is **net settlement volume**. Refunds have no silver/gold layer yet, so nothing here subtracts them. `net_volume = settled volume − refunds` arrives with the refunds medallion.
 - **Partitioned by:** `days(payment_hour)`
 - **Guarantee:** Full idempotent recompute from silver. Because it is a full atomic replace, hours whose payments were all deleted from silver are dropped from gold. Correct after inserts, updates, and deletes.
 
@@ -59,7 +65,31 @@ Gold is a full idempotent recompute from silver: every run runs one `GROUP BY` a
 
 ## CDC Delete Handling
 
-Debezium sets `op=d` on delete events and populates `before` instead of `after`. The silver `foreachBatch` function splits each micro-batch into upserts (`op` in `c`, `u`, `r`) and deletes (`op=d`), issuing a `MERGE INTO` for the former and a `DELETE FROM` for the latter using `before.payment_id`. Records deleted in Postgres are removed from silver and recalculated out of gold on the next run.
+Debezium sets `op=d` on delete events and populates `before` instead of `after`. Silver
+applies all four ops in **one** `MERGE INTO`, with three branches:
+
+| Branch | Condition | Action |
+|---|---|---|
+| `MATCHED` | newer LSN, `op = 'd'` | `DELETE` |
+| `MATCHED` | newer LSN, `op` in `c`/`u`/`r` | `UPDATE` |
+| `NOT MATCHED` | `op` in `c`/`u`/`r` | `INSERT` |
+
+Records deleted in Postgres are removed from silver and recalculated out of gold on the next run.
+
+Two details carry the correctness:
+
+- **Deletes are a branch, not a second pass.** Applying deletes after the upsert merge made a
+  delete followed by a re-create of the same key finish deleted, whatever the sequence said.
+- **The sequence token is the Postgres LSN** (`$.source.lsn`), guarded on *both* `MATCHED`
+  branches so a stale delete and a stale update each lose to the row already in silver.
+  Not `updated_at`: it ties across rows written in one transaction, and under Postgres'
+  default `REPLICA IDENTITY` a delete's `before` carries only the primary key, so
+  `before.updated_at` is null. Not `kafka_offset` either — that is only ordered within a
+  partition. The LSN is monotonic across the whole WAL.
+
+The connector sets `tombstones.on.delete=false`. The `op=d` event already carries the delete,
+and the null-valued tombstone that would otherwise follow it is not a malformed record —
+reading it as one put a row in the dead-letter table for every legitimate delete.
 
 ## Known Limitations
 
@@ -129,11 +159,11 @@ Postgres payments ─────────────┘                    
 - **`dim_fx_rates` (table).** One `rate_to_usd` per currency per **calendar** day. ECB publishes business days only, so `dim_date`'s spine × currencies is left-joined to actual rates and **forward-filled** (`LAST_VALUE ... IGNORE NULLS`, with a backward `FIRST_VALUE` for the leading edge); `is_filled` flags carried days. Guarantees every payment date resolves to a rate. Together with the fact this forms a Kimball-style star schema (see the ERD in `snowflake_etl/README.md`); grain is enforced by `unique`/`not_null` dbt tests.
 - **`fct_payments_usd` (table).** `LEFT JOIN` payments to the dimension on `(currency, created_date)`; `usd_amount = ROUND(amount × rate_to_usd, 2)`. LEFT (not INNER) so an unmatched payment survives with a NULL `usd_amount` for validation to catch, rather than being silently dropped.
 - **`agg_payments_by_currency` (table).** Monthly USD volume by currency/country — deliberately a different grain from the lakehouse's hourly operational gold. The two pipelines are two consumption tiers (operational vs. financial), not duplicates.
-- **`validate` (gates).** Named PASS/FAIL checks the orchestrator asserts: fact reconciles to payments (N == N), no unmatched USD amount, no null/zero FX rate, USD identity (USD payments convert 1:1). The DAG's validate task raises on any FAIL.
+- **`validate` (gates).** Named PASS/FAIL checks the orchestrator asserts: fact reconciles to payments (N == N), fact is not stale relative to staging (state parity, not just row count), no timestamp more than a day in the future, no unmatched USD amount, no null/zero FX rate, USD identity (USD payments convert 1:1). The DAG's validate task raises on any FAIL.
 
 ### Orchestration & governance
 
-The DAG `snowflake_fx_etl` stages the two sources to S3 in parallel (TaskFlow `@task`; payments extracted **incrementally** by `updated_at` over Airflow's data interval, full snapshot on manual triggers), fans into the RAW load (`SnowflakeOperator` over a managed `snowflake_default` connection), then `dbt run` builds the star schema (the fact is a dbt **incremental** model MERGEd by `payment_id` past a `MAX(updated_at)` watermark) and `dbt test` asserts the data-quality gates. Both DAGs alert on failure via a configurable webhook (`airflow/dags/alerts.py`). Snowflake auth is key-pair (`SNOWFLAKE_PRIVATE_KEY_PATH`; password fallback). Terraform (`infra/terraform/snowflake/`, remote S3 state with native lockfile) owns the database, schemas, warehouse, role/grants, and the AWS↔Snowflake storage integration + external stage — the same infra-vs-workload split as the Databricks port.
+The DAG `snowflake_fx_etl` stages the two sources to S3 in parallel (TaskFlow `@task`; payments extracted **incrementally** by `updated_at` over Airflow's data interval, full snapshot on manual triggers), registers the run in `RAW.SNAPSHOT_RUNS`, fans into the RAW load (`SnowflakeOperator` over a managed `snowflake_default` connection), reconciles what landed against what was staged before stamping the run complete, then `dbt run` builds the star schema (staging resolves the newest **completed full snapshot**, so a payment's absence means it was deleted; the fact is a full rebuild from it, with no watermark derived from business data) and `dbt test` asserts the data-quality gates. Both DAGs alert on failure via a configurable webhook (`airflow/dags/alerts.py`). Snowflake auth is key-pair (`SNOWFLAKE_PRIVATE_KEY_PATH`; password fallback). Terraform (`infra/terraform/snowflake/`, remote S3 state with native lockfile) owns the database, schemas, warehouse, role/grants, and the AWS↔Snowflake storage integration + external stage — the same infra-vs-workload split as the Databricks port.
 
 ### Known limitations
 

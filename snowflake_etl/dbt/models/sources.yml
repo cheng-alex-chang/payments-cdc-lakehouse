@@ -13,3 +13,11 @@ sources:
         description: Daily full-snapshot extracts of the Postgres payments table (one JSON object per row in `raw`).
       - name: raw_fx_rates
         description: Daily ECB FX rates from the Frankfurter API, already inverted to rate_to_usd (USD per unit).
+      - name: snapshot_runs
+        description: >
+          Staging-run control table (snowflake_etl/src/load_to_snowflake.py). One row per
+          run, carrying it through staged -> loaded -> completed. `completed_at` is set only
+          once COPY INTO reconciled against what staging wrote, so a run is invisible to
+          stg_payments until its data is provably in RAW. `snapshot_type` separates a full
+          snapshot from a windowed delta -- only a full one describes the current state of
+          the source, and only a full one may drive delete detection.

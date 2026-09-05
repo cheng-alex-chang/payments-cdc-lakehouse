@@ -12,6 +12,7 @@
     "slot.name": "payments_cdc_slot",
     "publication.autocreate.mode": "filtered",
     "decimal.handling.mode": "string",
+    "tombstones.on.delete": "false",
     "key.converter": "org.apache.kafka.connect.json.JsonConverter",
     "value.converter": "org.apache.kafka.connect.json.JsonConverter",
     "value.converter.schemas.enable": "false",

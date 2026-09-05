@@ -23,13 +23,13 @@ operational* gold; this produces *monthly, USD-normalized* financials.
 ```text
 Frankfurter FX API ─▶ extract_fx_rates ─┐
 (ECB daily rates)                       │  @task (parallel; payments incremental by updated_at)
-                                        ├─▶ stage_to_s3 ─▶ s3://bucket/raw/<dataset>/dt=<date>/*.jsonl
+                                        ├─▶ stage_to_s3 ─▶ s3://bucket/raw/<dataset>/dt=<date>/run=<run_id>/part-*.jsonl
 Postgres payments  ─▶ extract_payments ─┘                          │
 (50k / 12mo / 6ccy)                                                ▼  COPY INTO (SnowflakeOperator)
                                                           RAW.RAW_FX_RATES / RAW.RAW_PAYMENTS  (VARIANT)
                                                                    │  dbt run (star schema)
                                                                    ▼
-   stg_* (type+dedup) ─▶ dim_date ─▶ dim_fx_rates (forward-fill) ─▶ fct_payments_usd (incremental) ─▶ agg
+   stg_* (type+dedup) ─▶ dim_date ─▶ dim_fx_rates (forward-fill) ─▶ fct_payments_usd (full rebuild) ─▶ agg
                                                                    │
                                                           dbt test (12 data-quality gates)
 ```
@@ -105,7 +105,7 @@ terraform -chdir=infra/terraform/snowflake validate
   Snowflake connect/COPY. **Skips** unless `AWS_*` / `SNOWFLAKE_*` are set:
   ```bash
   pip install -r requirements-snowflake.txt
-  AWS_ACCESS_KEY_ID=… S3_BUCKET=… SNOWFLAKE_ACCOUNT=… SNOWFLAKE_USER=… \
+  AWS_ACCESS_KEY_ID=… SNOWFLAKE_LAKE_BUCKET=… SNOWFLAKE_ACCOUNT=… SNOWFLAKE_USER=… \
   SNOWFLAKE_PRIVATE_KEY_PATH=~/.snowflake/rsa_key.p8 \
   SNOWFLAKE_STAGE=PAYMENTS_LAKE_STAGE pytest -m integration
   ```
@@ -128,8 +128,8 @@ terraform -chdir=infra/terraform/snowflake apply  # db, schemas, warehouse, role
 # (state is remote: versioned S3 bucket + native lockfile, see versions.tf)
 
 # Then run the pipeline (or trigger the DAG). The connector uses the combined SNOWFLAKE_ACCOUNT:
-export SNOWFLAKE_ACCOUNT=ORG-ACCT  S3_BUCKET=$TF_VAR_s3_bucket  SNOWFLAKE_ROLE=ACCOUNTADMIN
-python -m snowflake_etl.src.stage_to_s3 --bucket $S3_BUCKET --run-date $(date +%F)
+export SNOWFLAKE_ACCOUNT=ORG-ACCT  SNOWFLAKE_LAKE_BUCKET=$TF_VAR_s3_bucket  SNOWFLAKE_ROLE=ACCOUNTADMIN
+python -m snowflake_etl.src.stage_to_s3 --bucket $SNOWFLAKE_LAKE_BUCKET --run-date $(date +%F)
 python -m snowflake_etl.src.load_to_snowflake --run-date $(date +%F)
 dbt run  --project-dir snowflake_etl/dbt --profiles-dir snowflake_etl/dbt
 dbt test --project-dir snowflake_etl/dbt --profiles-dir snowflake_etl/dbt

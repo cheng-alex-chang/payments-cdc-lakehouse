@@ -184,3 +184,31 @@ def test_env_example_defines_every_interpolated_variable() -> None:
     }
 
     assert not referenced - defined, f"used in Compose, absent from .env.example: {sorted(referenced - defined)}"
+
+
+def test_iceberg_vectorization_is_not_set_per_runtime() -> None:
+    """One value for every runtime, or the acceptance suite stops testing production.
+
+    Iceberg's vectorized Parquet reader aborts the JVM on arm64 when a scan feeds a shuffle,
+    so config/spark/jobs/common.py disables it by default. The override exists to re-enable
+    it once an image ships a fixed Arrow/JVM combination -- but set in Compose or in the
+    Kubernetes manifests alone, it silently splits the read path between what CI exercises
+    and what runs in the cluster, and this crash is native: it takes the driver down rather
+    than failing a task.
+
+    So the value may be changed, and must be changed everywhere at once. Setting it in one
+    runtime and not the other is what this forbids.
+    """
+    sources = [COMPOSE_PATH, *(REPO_ROOT / "k8s").rglob("*.yaml"), *(REPO_ROOT / "k8s").rglob("*.yml")]
+    setters = [
+        path.relative_to(REPO_ROOT)
+        for path in sources
+        if path.is_file() and "ICEBERG_VECTORIZATION" in path.read_text(encoding="utf-8")
+    ]
+
+    assert not setters, (
+        "ICEBERG_VECTORIZATION is set in "
+        f"{[str(p) for p in setters]} but not in every runtime. Either drop it and let "
+        "config/spark/jobs/common.py hold the single default, or set the same value in all "
+        "of them -- a per-runtime split means CI no longer exercises the production read path."
+    )

@@ -68,6 +68,41 @@ jobs:
           print(f"matrix={json.dumps(matrix)}")
           PY
 
+  # The silver CDC semantics, executed on a real Spark + Iceberg session rather than
+  # asserted as SQL text. Its own job, not a bucket, for two reasons: the bucket matrix
+  # calls a shared reusable workflow that installs one requirements file for every bucket,
+  # and this tier needs a JVM plus a ~300 MB pyspark that the other five have no use for.
+  #
+  # Not allowed to skip quietly. pytest exits 5 when a marker selects nothing, and a
+  # missing pyspark would otherwise turn "the merge is correct" into a green no-op -- the
+  # same failure mode the authenticated jobs are shaped to avoid.
+  spark-semantics:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # Spark resolves the Iceberg runtime jar from Maven on first session start; caching it
+      # keeps the job off the network on repeat runs.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.ivy2
+          key: ivy2-iceberg-${{ hashFiles('tests/spark/test_silver_cdc_semantics.py') }}
+
+      - run: pip install -r requirements-ci.txt -r requirements-spark.txt
+
+      - name: Silver CDC semantics on real Spark
+        run: pytest -m spark tests/spark -q
+
   test:
     needs: test-matrix
     strategy:
@@ -400,6 +435,7 @@ jobs:
     needs:
       - lint
       - coverage-gate
+      - spark-semantics
       - build
       - digest-manifest
       - cdc-integration

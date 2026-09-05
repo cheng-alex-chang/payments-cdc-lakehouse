@@ -51,3 +51,16 @@ def test_canonicalize_text_normalizes_spacing_and_case() -> None:
 
 def test_canonicalize_country_code_uppercases_value() -> None:
     assert canonicalize_country_code(" gb ") == "GB"
+
+
+def test_iceberg_vectorization_is_off_by_default() -> None:
+    """Vectorized Iceberg reads abort the JVM on arm64 when a scan feeds a shuffle.
+
+    `free(): invalid pointer` then SIGABRT, which takes the driver down instead of failing
+    a task -- and every medallion stage groups over an Iceberg table, so all three jobs are
+    affected. Overridable for platforms where the stack is known good.
+    """
+    from config.spark.jobs.common import iceberg_settings
+
+    assert iceberg_settings({})["vectorization"] == "false"
+    assert iceberg_settings({"ICEBERG_VECTORIZATION": "true"})["vectorization"] == "true"

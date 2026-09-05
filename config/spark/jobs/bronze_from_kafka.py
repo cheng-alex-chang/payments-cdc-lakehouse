@@ -4,7 +4,7 @@ import logging
 import os
 
 from common import configure_iceberg, checkpoint_path
-from payment_rules import mask_pii_fields
+from payment_rules import bronze_duplicate_offsets_sql, mask_pii_fields
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, udf
 from pyspark.sql.types import StringType
@@ -17,6 +17,37 @@ CHECKPOINT_PATH = checkpoint_path("bronze")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
 LOGGER = logging.getLogger(__name__)
+
+
+class BronzeReplayDetected(RuntimeError):
+    """Bronze holds the same Kafka record twice -- the topic was re-consumed."""
+
+
+def assert_no_replayed_offsets(spark) -> None:  # noqa: ANN001 - SparkSession
+    """Fail the run if any (topic, partition, offset) appears in bronze more than once.
+
+    Bronze is append-only and reads from ``startingOffsets=earliest``, so the only thing
+    standing between a restart and re-consuming the whole topic is the streaming checkpoint
+    -- which deliberately lives in its own bucket, away from the warehouse. That separation
+    is right for blast radius, and it also means losing the checkpoint bucket duplicates the
+    entire event history into an append-only table.
+
+    Detecting it costs one aggregate and turns a silent doubling into a failed task. The
+    recovery is not automatic and must not be: see the recovery contract in
+    docs/architecture-lakehouse.md. Kafka retention is a window, not an archive, so a rebuild
+    from the topic is only complete while the affected offsets are still retained.
+    """
+    duplicates = spark.sql(bronze_duplicate_offsets_sql(BRONZE_TABLE))
+    offending = duplicates.count()
+    if offending:
+        sample = [row.asDict() for row in duplicates.limit(5).collect()]
+        raise BronzeReplayDetected(
+            f"{offending} Kafka coordinate(s) appear more than once in {BRONZE_TABLE}: "
+            f"{sample}. Bronze has re-consumed the topic -- most likely the checkpoint at "
+            f"{CHECKPOINT_PATH} was lost. Do not simply re-run: follow the recovery contract "
+            f"in docs/architecture-lakehouse.md."
+        )
+    LOGGER.info("Bronze offset uniqueness verified for %s", BRONZE_TABLE)
 
 
 def main() -> None:
@@ -84,6 +115,9 @@ def main() -> None:
         .toTable(BRONZE_TABLE)
     )
     query.awaitTermination()
+
+    assert_no_replayed_offsets(spark)
+
     LOGGER.info("Bronze streaming job completed")
     spark.stop()
 

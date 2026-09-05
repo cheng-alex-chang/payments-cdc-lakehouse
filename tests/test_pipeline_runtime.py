@@ -107,6 +107,7 @@ class FakeExpr:
     def cast(self, _value: str) -> "FakeExpr": return self
     def alias(self, _value: str) -> "FakeExpr": return self
     def desc(self) -> "FakeExpr": return self
+    def desc_nulls_last(self) -> "FakeExpr": return self
     def over(self, _window: object) -> "FakeExpr": return self
     def otherwise(self, _value: object) -> "FakeExpr": return self
     def isNotNull(self) -> "FakeExpr": return self
@@ -287,7 +288,7 @@ def load_module_with_fake_pyspark(monkeypatch: pytest.MonkeyPatch, module_name: 
 
     functions_module = types.ModuleType("pyspark.sql.functions")
     for name in [
-        "avg", "col", "count", "current_timestamp", "date_trunc",
+        "avg", "coalesce", "col", "count", "current_timestamp", "date_trunc",
         "from_unixtime", "get_json_object", "input_file_name", "lit", "lower",
         "regexp_replace", "sum", "trim", "upper", "when",
     ]:
@@ -600,16 +601,25 @@ def test_silver_upsert_fn_merges_upserts(monkeypatch: pytest.MonkeyPatch) -> Non
     assert module.SILVER_TABLE in merge_calls[0]
 
 
-def test_silver_upsert_fn_deletes_on_d_op(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_silver_upsert_fn_applies_deletes_inside_the_merge(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deletes are a branch of the one sequenced MERGE, not a second pass.
+
+    The separate `DELETE FROM ... WHERE payment_id IN (...)` this replaces ran after the
+    upsert merge unconditionally, so a delete followed by a re-create of the same key in one
+    batch always finished deleted regardless of sequence.
+    """
     module, spark, builder = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.silver_payments")
     monkeypatch.setattr(module, "_validate_upserts", lambda upserts: None)
     monkeypatch.setattr(module, "_write_to_dlq", lambda *_: None)
 
     module._upsert_to_silver(FakeFrame(), 0)
 
-    delete_calls = [c for c in spark.sql_calls if "DELETE FROM" in c]
-    assert len(delete_calls) >= 1
-    assert module.SILVER_TABLE in delete_calls[0]
+    assert not [c for c in spark.sql_calls if "DELETE FROM" in c], "second delete pass is back"
+
+    merge_calls = [c for c in spark.sql_calls if "MERGE INTO" in c]
+    assert len(merge_calls) == 1, "deletes and upserts must resolve in one statement"
+    assert "THEN DELETE" in merge_calls[0]
+    assert module.SILVER_TABLE in merge_calls[0]
 
 
 def test_silver_upsert_routes_malformed_to_dlq(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -685,11 +695,11 @@ def test_validate_upserts_passes_on_clean_data(monkeypatch: pytest.MonkeyPatch) 
     module._validate_upserts(_make_dq_mock(_CLEAN_QUALITY_METRICS))  # must not raise
 
 
-def test_build_upserts_dedups_latest_per_payment_id(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_build_changes_dedups_latest_per_payment_id(monkeypatch: pytest.MonkeyPatch) -> None:
     module, _, _ = load_module_with_fake_pyspark(monkeypatch, "config.spark.jobs.silver_payments")
 
     frame = FakeFrame()
-    result = module._build_upserts(frame)
+    result = module._build_changes(frame)
 
     # Dedup must add row_number then filter to row 1, then drop helper columns
     op_names = [name for name, _ in result.operations]

@@ -55,18 +55,40 @@ class FakeDAG:
 
 
 def _fake_task(*dargs, **dkwargs):  # noqa: ANN002, ANN003
-    """Stand-in for airflow.decorators.task: @task(task_id=...) -> callable -> node-on-call."""
+    """Stand-in for airflow.decorators.task: @task(task_id=...) -> callable -> node-on-call.
+
+    Passing one task's return value into another is how TaskFlow declares a dependency --
+    real Airflow turns the XComArg into an edge without any `>>`. The fake mirrors that:
+    any FakeNode appearing in the call arguments becomes an upstream of this node.
+    Without it the harness reports the data-carrying edges as absent, which reads as a
+    missing dependency in the DAG rather than a gap in the double.
+    """
     def decorator(fn):  # noqa: ANN001, ANN202
         task_id = dkwargs.get("task_id", fn.__name__)
 
         def make(*args, **kwargs) -> FakeNode:  # noqa: ANN002, ANN003
-            return FakeNode(task_id, kind="taskflow")
+            node = FakeNode(task_id, kind="taskflow")
+            for value in (*args, *kwargs.values()):
+                for candidate in (value if isinstance(value, (list, tuple)) else [value]):
+                    if isinstance(candidate, FakeNode):
+                        candidate.downstream_task_ids.add(task_id)
+            return node
 
         return make
 
     if dargs and callable(dargs[0]) and not dkwargs:
         return decorator(dargs[0])  # bare @task usage
     return decorator
+
+
+class FakeSnowflakeHook:
+    """The DAG only builds tasks at parse time; the hook is never connected here."""
+
+    def __init__(self, *, snowflake_conn_id: str) -> None:
+        self.snowflake_conn_id = snowflake_conn_id
+
+    def get_conn(self):  # noqa: ANN201 - pragma: no cover
+        raise AssertionError("DAG parsing must not open a Snowflake connection")
 
 
 class FakeSnowflakeOperator(FakeNode):
@@ -92,6 +114,9 @@ def _load_dag(monkeypatch: pytest.MonkeyPatch) -> FakeDAG:
     sf_ops = types.ModuleType("airflow.providers.snowflake.operators")
     sf_ops_sf = types.ModuleType("airflow.providers.snowflake.operators.snowflake")
     sf_ops_sf.SnowflakeOperator = FakeSnowflakeOperator
+    sf_hooks = types.ModuleType("airflow.providers.snowflake.hooks")
+    sf_hooks_sf = types.ModuleType("airflow.providers.snowflake.hooks.snowflake")
+    sf_hooks_sf.SnowflakeHook = FakeSnowflakeHook
 
     for name, mod in {
         "airflow": airflow_module,
@@ -102,6 +127,8 @@ def _load_dag(monkeypatch: pytest.MonkeyPatch) -> FakeDAG:
         "airflow.providers.snowflake": sf,
         "airflow.providers.snowflake.operators": sf_ops,
         "airflow.providers.snowflake.operators.snowflake": sf_ops_sf,
+        "airflow.providers.snowflake.hooks": sf_hooks,
+        "airflow.providers.snowflake.hooks.snowflake": sf_hooks_sf,
     }.items():
         monkeypatch.setitem(sys.modules, name, mod)
 
@@ -120,15 +147,37 @@ def test_snowflake_fx_etl_dag_shape(monkeypatch: pytest.MonkeyPatch) -> None:
     assert dag.schedule_interval is None
     assert dag.max_active_runs == 1
     assert dag.task_ids == {
-        "stage_fx_rates", "stage_payments", "load_raw", "dbt_run", "dbt_test",
+        "stage_fx_rates", "stage_payments", "register_runs", "load_raw",
+        "validate_snapshot_load", "dbt_run", "dbt_test",
     }
 
-    # Two source extracts stage to S3 in parallel, then fan in to load -> dbt run -> dbt test.
-    assert dag.get_task("stage_fx_rates").downstream_task_ids == {"load_raw"}
-    assert dag.get_task("stage_payments").downstream_task_ids == {"load_raw"}
-    assert dag.get_task("load_raw").downstream_task_ids == {"dbt_run"}
+    # Two source extracts stage to S3 in parallel, then fan in to the completion state
+    # machine -- register (staged) -> load (RAW) -> validate (reconciled + completed) --
+    # and only then to dbt.
+    assert dag.get_task("stage_fx_rates").downstream_task_ids == {"register_runs"}
+    assert dag.get_task("stage_payments").downstream_task_ids == {"register_runs"}
+    assert dag.get_task("register_runs").downstream_task_ids == {
+        "load_raw", "validate_snapshot_load",
+    }
+    assert dag.get_task("load_raw").downstream_task_ids == {"validate_snapshot_load"}
     assert dag.get_task("dbt_run").downstream_task_ids == {"dbt_test"}
     assert dag.get_task("dbt_test").downstream_task_ids == set()
+
+
+def test_dbt_never_runs_before_the_snapshot_is_marked_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """stg_payments reads the newest *completed* run and treats absence as deletion.
+
+    If dbt could run while completed_at were still NULL -- or worse, on a run whose COPY
+    half-loaded -- it would read the missing rows as deletes and propagate them to the fact
+    and both marts. The ordering is the guard.
+    """
+    dag = _load_dag(monkeypatch)
+
+    assert dag.get_task("validate_snapshot_load").downstream_task_ids == {"dbt_run"}
+    assert "dbt_run" not in dag.get_task("load_raw").downstream_task_ids
+    assert "dbt_run" not in dag.get_task("register_runs").downstream_task_ids
 
 
 def test_load_raw_uses_managed_connection_and_templated_partition(

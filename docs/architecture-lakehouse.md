@@ -55,10 +55,53 @@ migration: **the catalog is asked where a table is, then the engine reads the st
 | Layer | Written by | Pattern | Source of truth |
 |---|---|---|---|
 | bronze | `spark-bronze` | append-only, streaming from Kafka with `trigger(availableNow=True)` | Kafka topic |
-| silver | `spark-silver` | `MERGE INTO` upserts + `DELETE` for CDC deletes, latest-per-key | bronze |
+| silver | `spark-silver` | one sequenced `MERGE INTO` applying all four CDC ops, ordered by Postgres LSN | bronze |
 | gold | `spark-gold` | full `INSERT OVERWRITE` aggregate | silver |
 
 Gold reads nothing from bronze — lineage stays strictly linear.
+
+Silver applies inserts, updates and deletes in a **single** `MERGE`, guarded on
+`s.source_lsn > t.source_lsn`. Both properties are load-bearing. A separate delete pass
+made a delete-then-recreate of one key finish deleted regardless of sequence, and an
+unguarded `UPDATE SET *` let a replayed batch overwrite newer state with older. Together
+they are what make silver converge on replay rather than regress.
+
+## Recovery contract
+
+Bronze and silver hold independent Structured Streaming checkpoints; gold is a full
+recompute with no state of its own. So the layers can be at different points in the stream,
+and resetting one alone has consequences the code does not state. This table is the contract
+— **reset what a row says to reset, together.**
+
+| Scenario | Reset | Do not reset | Notes |
+|---|---|---|---|
+| Normal retry | nothing | — | Both jobs use `trigger(availableNow=True)`; a failed task re-runs from its own checkpoint. This is the default and covers most failures. |
+| Silver logic change | silver checkpoint **and** `payments_silver` | bronze, bronze checkpoint | Replays bronze through the new logic. Safe because the merge is sequenced: re-applying old events cannot regress state. Rebuild gold afterwards. |
+| Bronze replay detected | bronze checkpoint **and** `payments_bronze`, then silver as above | — | `assert_no_replayed_offsets` failed, so bronze holds duplicate `(topic, partition, offset)`. See below — this one is not a simple re-run. |
+| Full rebuild | both checkpoints, all three tables | — | Only when the topic still retains everything needed. Verify retention first. |
+
+Two rules that fall out of it:
+
+- **Never reset a checkpoint without the table it feeds.** Resetting the bronze checkpoint
+  alone re-consumes the topic into an append-only table and doubles the event history.
+  Resetting `payments_silver` without its checkpoint leaves silver empty and the stream
+  believing it has already delivered those batches.
+- **Gold needs no decision.** It is `INSERT OVERWRITE` from silver, so re-running it after
+  any of the above is always correct and never partial.
+
+### Kafka retention is a window, not an archive
+
+`assert_no_replayed_offsets` in `bronze_from_kafka.py` fails the run when a Kafka coordinate
+appears in bronze twice, which means the topic was re-consumed — almost always a lost
+checkpoint bucket. Recovery is deliberately manual, because "rebuild bronze from Kafka" is
+only complete while the affected offsets are still retained.
+
+Before rebuilding, check the topic's earliest available offset against what bronze needs. If
+retention no longer covers it, a replay silently produces a *partial* history that looks
+clean — no duplicates, no error, just missing events. In that case reconstruct from the
+Iceberg snapshot history of `payments_bronze` (time-travel to before the duplication and
+rewrite), or re-seed from Postgres and accept that pre-retention change history is gone.
+Choosing between those is an operator decision; the pipeline will not make it silently.
 
 ## Storage and catalog split
 
