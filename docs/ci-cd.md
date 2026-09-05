@@ -45,7 +45,7 @@ so gating one on the other would cost minutes for nothing.
 | File | Purpose |
 |---|---|
 | `ci.yml` | Everything on a PR: validate, test, build, CDC, acceptance |
-| `release-cloud.yml` | **Manual only** (see below): Databricks, Snowflake, dbt, behind approval |
+| `release-cloud.yml` | Databricks, Snowflake, dbt. Dispatch, or a push to `main` touching a cloud asset (see below) |
 
 ### Test tiers
 
@@ -121,49 +121,66 @@ the `dev` target is `mode: development`, which resolves workspace identity. So P
 `scripts/validate_databricks_bundle.py` (structural, no network) and only `main` runs the
 authenticated command — where a missing secret **fails** rather than reporting green.
 
-## Why the cloud release is manual
+## When the cloud release runs
 
-The workflow is written and gated, but `workflow_dispatch` only. Both original blockers
-have now been addressed, and a third — secrets — is what remains.
+`workflow_dispatch`, plus a push to `main` that touches a cloud asset —
+`infra/terraform/**`, `databricks/**`, `snowflake_etl/dbt/**`, `snowflake_etl/src/**`, or
+the workflow itself. There is no approval gate; the `prod` environment no longer requires a
+reviewer.
 
-- ~~**No live Snowflake account.**~~ **Cleared (2026-09-05).** A new trial is provisioned,
-  Terraform applied cleanly against it, and the full chain was verified end to end: chunked
-  staging to S3, `COPY INTO` through the storage integration, run registration and
-  reconciliation, `dbt build` 20/20, and a source delete propagating through to the marts.
-- ~~**No separate Databricks workspace.**~~ **Worked around.** Free Edition still provides
-  one workspace, but the workspace was never what collided. `bundle validate` confirms the
-  two targets already deploy to different roots — `.../payments-pipeline/dev` and
-  `.../payments-pipeline/prod` (both under the user path on Free Edition, which has no
-  `/Shared` root; the suffix separates them, not the prefix). The collision was the *target
-  schema*: both published to `workspace.analytics`. The bundle now takes a `target_schema`
-  variable — `analytics_dev` for dev, `analytics` for prod — so the two deploy side by side.
-  Verified: dev resolves to `[dev <user>] payments-medallion-dlt` on
-  `workspace.analytics_dev`, prod to `payments-medallion-dlt` on `workspace.analytics`.
+Both original blockers are resolved:
 
-  Be honest about what that buys: the tables no longer collide, but this is one workspace
-  with one permissions boundary and one pool of serverless compute. A runaway dev pipeline
-  can still starve prod. It is a working arrangement for a single-workspace tier, not an
-  isolation guarantee. Point `prod` at its own host the day there is one — nothing else in
-  the bundle changes.
+- ~~**No live Snowflake account.**~~ There is one, and the full chain is verified against it:
+  chunked staging to S3, `COPY INTO` through the storage integration, run registration and
+  reconciliation, `dbt build`, and a source delete propagating to the marts.
+- ~~**No separate Databricks workspace.**~~ Free Edition still provides one, but the
+  workspace was never the collision — the *target schema* was. The bundle takes a
+  `target_schema` variable (`analytics_dev` / `analytics`) and both targets now deploy side
+  by side. One permissions boundary and one pool of serverless compute, so this is a working
+  single-workspace arrangement, not isolation.
 
-**What is still required before the merge trigger goes back.** The workflow now
-authenticates to Snowflake with a key pair rather than a password, which changed the secret
-set. These must exist in the repository:
+### Why the trigger is path-filtered rather than every push
 
-| Secret | Why |
-|---|---|
-| `SNOWFLAKE_ORGANIZATION_NAME` | The Terraform provider wants the account identifier **split** |
-| `SNOWFLAKE_ACCOUNT_NAME` | The other half; the workflow joins them for dbt and the connector |
-| `SNOWFLAKE_USER` | |
-| `SNOWFLAKE_PRIVATE_KEY` | PEM contents. Written to disk at job start, since dbt and the connector want a *path* while Terraform wants the string |
-| `AWS_TERRAFORM_ROLE_ARN` | OIDC role for the state bucket and lake — not an access key |
-| `DATABRICKS_HOST` / `DATABRICKS_TOKEN` | |
+This release is not a cheap no-op. It is a Terraform apply against two clouds plus a full
+`dbt build` into `ANALYTICS`, and every apply is another chance to meet state drift. Firing
+on every push would deploy production on a docs typo, would deploy on each Dependabot merge,
+and — when the Snowflake trial lapses — would turn every merge to `main` red while deploying
+nothing. That last one is precisely the failure this workflow was made manual to escape.
+Scoping to the paths that change what is deployed keeps the drift protection without any of
+it.
 
-`SNOWFLAKE_PASSWORD` is no longer used anywhere and can be deleted.
+This is the opposite conclusion from *Why the expensive jobs are not path-filtered* below,
+and deliberately so — the two cases differ in both respects that mattered there. Those are
+**required checks on a pull request**, where a filtered-out job never reports at all and the
+PR waits forever on a check that will not arrive; this is a **push trigger**, where not
+firing simply means no deploy. And those jobs are read-only verification, cheap to over-run;
+this one applies infrastructure and rebuilds a warehouse schema, where over-running has a
+cost and a blast radius.
 
-Left on a merge trigger it previously guaranteed a red `main` while deploying nothing — the
-run died at credential loading, before the approval gate. Restore `push: branches: [main]`
-once the secrets above are set and a dispatched run has gone green end to end.
+### Why running unattended is defensible now, and was not before
+
+The Terraform inputs fail closed. They did not always. An earlier approved run planned this
+against production:
+
+```
+Plan: 0 to add, 3 to change, 1 to destroy
+  snowflake_grant_account_role.etl_to_users["..."] will be destroyed
+  url = "s3://payments-lake-alexchang-2026/" -> "s3://payments-lake-changeme/"
+```
+
+The workflow supplied neither `TF_VAR_s3_bucket` nor `TF_VAR_etl_role_users`, so both fell
+back to defaults: repoint the external stage at a bucket that does not exist, and destroy
+the grant the pipeline authenticates with. It failed only because the OIDC role was missing
+an unrelated S3 permission — luck, not a safeguard. Neither variable has a default now, and
+`tests/test_terraform_inputs.py` fails if one comes back. **If that regresses, restore the
+required reviewer on the `prod` environment before touching this trigger.**
+
+### What the manual gate was worth
+
+Three of the four dispatched runs failed, each on a distinct bug that no local testing had
+surfaced: `mode: production` requiring an explicit `root_path`, the Databricks stack's
+remote state holding no resources while the workspace held both, and the Terraform inputs
+above. Worth remembering the next time a gate looks like ceremony.
 
 ## Two invariants worth knowing about
 
