@@ -45,3 +45,14 @@ variable "iam_role_name" {
   type        = string
   default     = "snowflake-payments-lake"
 }
+
+variable "etl_role_users" {
+  description = <<-EOT
+    Snowflake users to grant PAYMENTS_ETL_ROLE to. Without at least one, the role owns every
+    privilege the pipeline needs and nobody can assume it -- connecting with
+    SNOWFLAKE_ROLE=PAYMENTS_ETL_ROLE fails with "not granted to this user". Creating a
+    functional role is only half the job; it has to reach a principal.
+  EOT
+  type        = list(string)
+  default     = []
+}

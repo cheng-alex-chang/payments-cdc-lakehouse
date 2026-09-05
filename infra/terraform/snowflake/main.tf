@@ -38,6 +38,16 @@ resource "snowflake_account_role" "etl" {
   comment = "Functional role for the FX ELT pipeline."
 }
 
+# A functional role nobody holds is unusable: the pipeline connects as SNOWFLAKE_ROLE and
+# Snowflake refuses a role the user was never granted. Terraform provisioned the role and all
+# its privileges but stopped short of handing it to a principal, so the first real connection
+# after a fresh apply failed on exactly that.
+resource "snowflake_grant_account_role" "etl_to_users" {
+  for_each  = toset(var.etl_role_users)
+  role_name = snowflake_account_role.etl.name
+  user_name = each.value
+}
+
 # Least-privilege grants: operate the warehouse, use the database, and read/build in its schemas.
 resource "snowflake_grant_privileges_to_account_role" "warehouse" {
   account_role_name = snowflake_account_role.etl.name
@@ -49,9 +59,13 @@ resource "snowflake_grant_privileges_to_account_role" "warehouse" {
   }
 }
 
+# CREATE SCHEMA is not decoration: release-cloud.yml's rehearsal points dbt at a throwaway
+# ANALYTICS_CI_<sha> schema so a full build can be validated without touching ANALYTICS, and
+# dbt creates that schema itself as the ETL role. With USAGE alone the rehearsal fails at
+# "must have CREATE SCHEMA granted on DATABASE PAYMENTS" -- on every account, not just this one.
 resource "snowflake_grant_privileges_to_account_role" "database" {
   account_role_name = snowflake_account_role.etl.name
-  privileges        = ["USAGE"]
+  privileges        = ["USAGE", "CREATE SCHEMA"]
 
   on_account_object {
     object_type = "DATABASE"
@@ -59,12 +73,32 @@ resource "snowflake_grant_privileges_to_account_role" "database" {
   }
 }
 
+# `all_schemas_in_database` is a bulk grant over the schemas that exist *at the moment it
+# runs* -- it is not a standing rule. Terraform saw no dependency between it and the schema
+# resources (both only reference the database), scheduled them in parallel, and the grant
+# finished first. The result applied to zero schemas, and the pipeline's first connection
+# failed with "must have CREATE TABLE granted on SCHEMA PAYMENTS.RAW" against a role that
+# Terraform reported as fully granted.
+#
+# depends_on makes the ordering explicit; the companion future-schemas grant below covers
+# schemas added later, which the bulk grant never would.
 resource "snowflake_grant_privileges_to_account_role" "schemas" {
   account_role_name = snowflake_account_role.etl.name
   privileges        = ["USAGE", "CREATE TABLE", "CREATE VIEW"]
 
   on_schema {
     all_schemas_in_database = snowflake_database.payments.name
+  }
+
+  depends_on = [snowflake_schema.raw, snowflake_schema.analytics]
+}
+
+resource "snowflake_grant_privileges_to_account_role" "future_schemas" {
+  account_role_name = snowflake_account_role.etl.name
+  privileges        = ["USAGE", "CREATE TABLE", "CREATE VIEW"]
+
+  on_schema {
+    future_schemas_in_database = snowflake_database.payments.name
   }
 }
 

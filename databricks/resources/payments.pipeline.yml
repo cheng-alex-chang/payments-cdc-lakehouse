@@ -1,12 +1,14 @@
 # Lakeflow Declarative Pipeline (DLT) for the payments medallion.
-# Publishes bronze / silver / gold to workspace.analytics with expectations + AUTO CDC.
+# Publishes bronze / silver / gold to workspace.${var.target_schema} with expectations +
+# AUTO CDC. The schema is per-target so dev and prod coexist in one Free Edition
+# workspace instead of overwriting each other's tables -- see databricks.yml.
 resources:
   pipelines:
     payments_dlt:
       name: payments-medallion-dlt
       serverless: true
       catalog: workspace
-      schema: analytics
+      schema: ${var.target_schema}
       libraries:
         - notebook:
             path: ../src/dlt_pipeline.py
