@@ -5,10 +5,14 @@ actually rejects broken input rather than only accepting the repo's current one.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import yaml
 
 from scripts import validate_databricks_bundle as validator
+
+REPO_BUNDLE = Path(__file__).resolve().parents[1] / "databricks"
 
 
 def write_bundle(root, bundle: dict, resources: dict[str, dict] | None = None) -> None:
@@ -125,3 +129,27 @@ def test_templated_path_is_not_checked_on_disk(tmp_path):
     task = {"notebook_task": {"notebook_path": "${workspace.root}/x.py"}}
     write_bundle(tmp_path, MINIMAL, {"a.yml": job_resource(task)})
     validator.main(tmp_path)
+
+
+def test_dev_and_prod_publish_to_different_schemas():
+    """Free Edition has one workspace, so the schema is what separates the two targets.
+
+    Both targets used to publish to workspace.analytics, which meant a prod deploy
+    overwrote the tables dev was using -- the reason the cloud release was pinned to
+    manual. The workspace path was never the collision: mode: production already roots
+    itself at /Shared/.bundle/<name>/<target>, distinct from dev's per-user path.
+    """
+    bundle = yaml.safe_load((REPO_BUNDLE / "databricks.yml").read_text(encoding="utf-8"))
+    targets = bundle["targets"]
+
+    schemas = {name: t["variables"]["target_schema"] for name, t in targets.items()}
+    assert len(set(schemas.values())) == len(schemas), (
+        f"targets must not share a schema in a single-workspace tier: {schemas}"
+    )
+
+    pipeline = yaml.safe_load(
+        (REPO_BUNDLE / "resources" / "payments.pipeline.yml").read_text(encoding="utf-8")
+    )["resources"]["pipelines"]["payments_dlt"]
+    # Hardcoding the schema again would silently reunite the targets.
+    assert pipeline["schema"] == "${var.target_schema}"
+    assert "target_schema" in bundle["variables"]

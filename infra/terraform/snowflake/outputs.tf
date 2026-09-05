@@ -1,5 +1,5 @@
 output "s3_bucket" {
-  description = "Raw lake bucket name (set as S3_BUCKET for the stager)."
+  description = "Raw lake bucket name (set as SNOWFLAKE_LAKE_BUCKET for the stager)."
   value       = aws_s3_bucket.lake.bucket
 }
 

@@ -46,6 +46,24 @@ so gating one on the other would cost minutes for nothing.
 |---|---|
 | `ci.yml` | Everything on a PR: validate, test, build, CDC, acceptance |
 | `release-cloud.yml` | **Manual only** (see below): Databricks, Snowflake, dbt, behind approval |
+
+### Test tiers
+
+Three, separated by what they cost to run — each excluded from the one below it so a
+heavy dependency never becomes a silent skip in the fast suite:
+
+| Tier | Selected by | Needs | Where |
+|---|---|---|---|
+| fast | default | nothing | the `test` bucket matrix |
+| spark | `-m spark tests/spark` | JDK 17 + `requirements-spark.txt` | `spark-semantics` job |
+| cdc | `-m integration_cdc` | nine containers | `cdc-integration` job |
+
+The `spark` tier exists because the silver MERGE's correctness is behaviour, not text.
+Delete-then-recreate ordering, stale-replay convergence and tombstone handling all
+produced valid SQL and a green fast suite while being wrong. Those tests are
+mutation-checked — remove the LSN guard and the two stale-state cases fail; remove the
+`THEN DELETE` branch and the delete case fails — so a green run means the guard is doing
+work rather than that the assertions are vacuous.
 | `security.yml` | CodeQL, Trivy, pip-audit, gitleaks; also weekly |
 
 The three reusable workflows now live in
@@ -105,22 +123,64 @@ authenticated command — where a missing secret **fails** rather than reporting
 
 ## Why the cloud release is manual
 
-The workflow is written and gated, but `workflow_dispatch` only. It cannot run
-unattended today for two reasons, neither fixable with a secret:
+The workflow is written and gated, but `workflow_dispatch` only. Both original blockers
+have now been addressed, and a third — secrets — is what remains.
 
-- **No live Snowflake account.** The trial expired. The rehearsal's `dbt build` and the
-  Snowflake `terraform plan` both need a real connection.
-- **No separate Databricks workspace.** Free Edition provides one. The `prod` target uses
-  `mode: production`, which drops the per-user prefixing `dev` relies on, so
-  `bundle deploy -t prod` would deploy into the workspace `dev` already occupies.
+- ~~**No live Snowflake account.**~~ **Cleared (2026-09-05).** A new trial is provisioned,
+  Terraform applied cleanly against it, and the full chain was verified end to end: chunked
+  staging to S3, `COPY INTO` through the storage integration, run registration and
+  reconciliation, `dbt build` 20/20, and a source delete propagating through to the marts.
+- ~~**No separate Databricks workspace.**~~ **Worked around.** Free Edition still provides
+  one workspace, but the workspace was never what collided. `bundle validate` confirms the
+  two targets already deploy to different roots — `.../payments-pipeline/dev` and
+  `.../payments-pipeline/prod` (both under the user path on Free Edition, which has no
+  `/Shared` root; the suffix separates them, not the prefix). The collision was the *target
+  schema*: both published to `workspace.analytics`. The bundle now takes a `target_schema`
+  variable — `analytics_dev` for dev, `analytics` for prod — so the two deploy side by side.
+  Verified: dev resolves to `[dev <user>] payments-medallion-dlt` on
+  `workspace.analytics_dev`, prod to `payments-medallion-dlt` on `workspace.analytics`.
 
-Left on a merge trigger it guaranteed a red `main` while deploying nothing — the run died
-at credential loading, before the approval gate. Nothing is lost by making it manual:
-`ci.yml`'s `bundle-authenticated` job already validates the Databricks bundle on every push
-to `main`, which is the only part of this track that can currently run.
+  Be honest about what that buys: the tables no longer collide, but this is one workspace
+  with one permissions boundary and one pool of serverless compute. A runaway dev pipeline
+  can still starve prod. It is a working arrangement for a single-workspace tier, not an
+  isolation guarantee. Point `prod` at its own host the day there is one — nothing else in
+  the bundle changes.
 
-Restore `push: branches: [main]` when there is an account to rehearse against and a
-workspace worth promoting into.
+**What is still required before the merge trigger goes back.** The workflow now
+authenticates to Snowflake with a key pair rather than a password, which changed the secret
+set. These must exist in the repository:
+
+| Secret | Why |
+|---|---|
+| `SNOWFLAKE_ORGANIZATION_NAME` | The Terraform provider wants the account identifier **split** |
+| `SNOWFLAKE_ACCOUNT_NAME` | The other half; the workflow joins them for dbt and the connector |
+| `SNOWFLAKE_USER` | |
+| `SNOWFLAKE_PRIVATE_KEY` | PEM contents. Written to disk at job start, since dbt and the connector want a *path* while Terraform wants the string |
+| `AWS_TERRAFORM_ROLE_ARN` | OIDC role for the state bucket and lake — not an access key |
+| `DATABRICKS_HOST` / `DATABRICKS_TOKEN` | |
+
+`SNOWFLAKE_PASSWORD` is no longer used anywhere and can be deleted.
+
+Left on a merge trigger it previously guaranteed a red `main` while deploying nothing — the
+run died at credential loading, before the approval gate. Restore `push: branches: [main]`
+once the secrets above are set and a dispatched run has gone green end to end.
+
+## Two invariants worth knowing about
+
+**Iceberg vectorization is one value everywhere.** The vectorized Parquet reader aborts the
+JVM on arm64 whenever a scan feeds a shuffle (`free(): invalid pointer`, SIGABRT) — and every
+medallion stage groups over an Iceberg table, so this is not a corner case. It is disabled in
+`config/spark/jobs/common.py` and deliberately *not* set per runtime;
+`tests/test_compose_manifest.py` fails if Compose or the Kubernetes manifests set it, because
+a per-runtime split means CI stops exercising the production read path. Re-enable it with
+`ICEBERG_VECTORIZATION=true` once an image ships a fixed Arrow/JVM combination — everywhere at
+once, with the acceptance suite as the gate.
+
+**Bootstrap stacks are hand-applied but not hand-remembered.** `infra/terraform/github-oidc`
+creates the OIDC provider and the role `release-cloud.yml` assumes, which CI cannot create for
+itself. Its state lives in the shared S3 bucket under `github-oidc/` like every other stack —
+not locally. A human applying it authenticates as themselves and already has bucket access, so
+there is no circularity, and losing a laptop does not make Terraform forget the role exists.
 
 ## Fork pull requests
 

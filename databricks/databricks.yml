@@ -6,12 +6,39 @@ bundle:
 include:
   - resources/*.yml
 
+# Free Edition provides exactly one workspace, so dev and prod cannot be separated the way
+# this bundle originally assumed. They do not have to be: what actually collided was never
+# the deployment path. Verified with `bundle validate` on Free Edition, the two targets
+# already land in different roots:
+#
+#   dev   /Workspace/Users/<me>/.bundle/payments-pipeline/dev
+#   prod  /Workspace/Users/<me>/.bundle/payments-pipeline/prod
+#
+# (Note prod stays under the user path here rather than /Shared -- Free Edition has no
+# /Shared root to fall back to. The suffix is what separates them, not the prefix.)
+#
+# The collision was the *target schema*. Both targets published bronze/silver/gold to
+# workspace.analytics, so a prod deploy overwrote the tables dev was using.
+#
+# Separating on schema instead of workspace makes both deployable side by side. Be clear
+# about what that buys and what it does not: the tables no longer collide, but this is one
+# workspace with one permissions boundary and one pool of serverless compute. A runaway dev
+# pipeline can still starve prod. It is a working arrangement for a single-workspace tier,
+# not an isolation guarantee -- point `prod` at its own workspace host the day there is one
+# and nothing else here has to change.
+variables:
+  target_schema:
+    description: Unity Catalog schema the medallion publishes into; separates dev from prod.
+    default: analytics
+
 targets:
   dev:
     mode: development
     default: true
     workspace:
       host: https://dbc-9e931fd5-a7b1.cloud.databricks.com
+    variables:
+      target_schema: analytics_dev
 
   # Deployed only by .github/workflows/release-cloud.yml, after a required reviewer
   # approves the `prod` GitHub Environment.
@@ -29,3 +56,5 @@ targets:
   # thing to keep in step.
   prod:
     mode: production
+    variables:
+      target_schema: analytics
