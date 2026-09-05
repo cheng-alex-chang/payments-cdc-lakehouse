@@ -51,10 +51,18 @@ targets:
   # environment. That keeps the production workspace out of the repository and lets this
   # target point at a separate workspace without a code change.
   #
-  # root_path is left to the default, which for mode: production is already
-  # /Shared/.bundle/${bundle.name}/${bundle.target} -- restating it would only be another
-  # thing to keep in step.
+  # root_path is explicit because `mode: production` requires it -- the CLI refuses to
+  # infer one, so that only ever one copy of the bundle is deployed. The comment this
+  # replaces claimed the default was already /Shared/.bundle/<name>/<target>; it is not,
+  # and Free Edition has no /Shared root to fall back to. `bundle validate -t prod` failed
+  # on this from the day the target was written, and went unnoticed because the workflow
+  # that runs it was manual-only and had never been dispatched.
+  #
+  # Interpolated rather than hardcoded to an address, and it keeps ${bundle.target} so dev
+  # and prod stay in separate roots in the one workspace Free Edition provides.
   prod:
     mode: production
+    workspace:
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
     variables:
       target_schema: analytics

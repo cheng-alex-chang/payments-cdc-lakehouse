@@ -153,3 +153,26 @@ def test_dev_and_prod_publish_to_different_schemas():
     # Hardcoding the schema again would silently reunite the targets.
     assert pipeline["schema"] == "${var.target_schema}"
     assert "target_schema" in bundle["variables"]
+
+
+def test_production_targets_pin_their_root_path():
+    """`mode: production` refuses to infer a root_path -- the CLI errors without one.
+
+    The bundle shipped without it and `bundle validate -t prod` had been failing since the
+    target was written. Nothing caught it: the repo's own validator does not model CLI
+    semantics, and the workflow that runs the real `bundle validate` is manual-only and had
+    never been dispatched. This is the cheap static half of that check.
+    """
+    bundle = yaml.safe_load((REPO_BUNDLE / "databricks.yml").read_text(encoding="utf-8"))
+
+    for name, target in bundle["targets"].items():
+        if target.get("mode") != "production":
+            continue
+        root_path = target.get("workspace", {}).get("root_path")
+        assert root_path, (
+            f"target {name!r} uses mode: production but sets no workspace.root_path; "
+            "`databricks bundle validate` fails on this."
+        )
+        # Keeping the target in the path is what stops prod landing on dev's deployment
+        # in a single-workspace tier.
+        assert "${bundle.target}" in root_path
