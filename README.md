@@ -64,8 +64,8 @@ FX REST API + Postgres
 
 `Silver`
 - Canonical payment records, typed and normalised
-- Dedup by `payment_id` (latest `updated_at`, tiebroken by `kafka_offset`) before MERGE so reruns and full Kafka replays converge to the same current state
-- `foreachBatch` issues `MERGE INTO` for upserts (`op` in c, u, r) and `DELETE FROM` for Debezium deletes (`op=d`)
+- Dedup by `payment_id` (highest Postgres `source_lsn`, tiebroken by `kafka_offset`) before MERGE so reruns and full Kafka replays converge to the same current state
+- `foreachBatch` issues one sequenced `MERGE INTO` covering all four ops — delete, update and insert branches — guarded on `s.source_lsn > t.source_lsn` so an out-of-order batch cannot overwrite newer state, and a delete-then-recreate resolves by sequence rather than by which pass ran last
 
 `Gold`
 - Hourly aggregates per country and payment method (count, gross volume, auth rate)

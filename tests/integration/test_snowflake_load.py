@@ -27,12 +27,16 @@ import pytest
 pytestmark = pytest.mark.integration
 
 # Connectivity needs account/user/password; the COPY also needs a stage pointing at staged data.
-_CRED_VARS = ("SNOWFLAKE_ACCOUNT", "SNOWFLAKE_USER", "SNOWFLAKE_PASSWORD")
-_HAS_CREDS = all(os.getenv(v) for v in _CRED_VARS)
+# Key-pair is the production auth path (Snowflake is deprecating single-factor passwords),
+# and load_to_snowflake.connect_from_env prefers it. Gating these tests on SNOWFLAKE_PASSWORD
+# alone meant they skipped silently on exactly the credentials a real deployment uses.
+_CRED_VARS = ("SNOWFLAKE_ACCOUNT", "SNOWFLAKE_USER")
+_HAS_AUTH = bool(os.getenv("SNOWFLAKE_PASSWORD") or os.getenv("SNOWFLAKE_PRIVATE_KEY_PATH"))
+_HAS_CREDS = all(os.getenv(v) for v in _CRED_VARS) and _HAS_AUTH
 _HAS_STAGE = _HAS_CREDS and bool(os.getenv("SNOWFLAKE_STAGE"))
 
 _needs_creds = pytest.mark.skipif(
-    not _HAS_CREDS, reason="set SNOWFLAKE_ACCOUNT/USER/PASSWORD to run the live Snowflake tests"
+    not _HAS_CREDS, reason="set SNOWFLAKE_ACCOUNT/USER plus PASSWORD or PRIVATE_KEY_PATH for the live tests"
 )
 _needs_stage = pytest.mark.skipif(
     not _HAS_STAGE, reason="set SNOWFLAKE_STAGE (and creds) plus stage data to run the live COPY"
@@ -71,7 +75,11 @@ def test_copy_fx_rates_into_raw_table() -> None:
             dataset="fx_rates",
             run_date=run_date,
         )
-        # First run loads > 0; a replay re-run loads 0 (files already loaded) -- both are valid.
-        assert loaded >= 0
+        # load_dataset reports a CopyOutcome, not a bare row count: the snapshot contract
+        # needs to know how many files were touched and whether any were skipped, not just
+        # a sum. A first run loads > 0 rows; a replay over an unchanged partition loads 0
+        # and reports the files as skipped -- both are valid here.
+        assert loaded.rows_loaded >= 0
+        assert loaded.file_count >= len(loaded.skipped)
     finally:
         conn.close()

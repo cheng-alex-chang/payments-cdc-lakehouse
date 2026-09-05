@@ -1,0 +1,11 @@
+# Runtime for tests/spark -- the silver CDC semantics executed on a real Spark session.
+#
+# Split out for the same reason as requirements-snowflake.txt: this is a ~300 MB dependency
+# plus a JVM, and the fast suite is deliberately free of both. Only the `spark-semantics`
+# CI job installs it.
+#
+# Needs a JDK 17+ on PATH (GitHub's ubuntu runners ship one; macOS often has only Java 8,
+# which no supported PySpark accepts -- `brew install openjdk@17` and set JAVA_HOME).
+# The Iceberg runtime jar is resolved by Spark itself from Maven at session start; the
+# coordinate is pinned in the test module.
+pyspark==3.5.1

@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import time
 from decimal import Decimal
 
@@ -151,12 +152,15 @@ def cdc_chain():
         }
 
         subprocess.run(
-            ["python", "scripts/init_object_store.py"],
+            # sys.executable, not "python": the bare name is not on PATH under a venv
+            # or on any machine that installs only python3, and the failure surfaces as
+            # a FileNotFoundError from subprocess rather than anything about the chain.
+            [sys.executable, "scripts/init_object_store.py"],
             cwd=REPO_ROOT, check=True, timeout=180, capture_output=True, text=True,
             env={**os.environ, **s3_credentials, "S3_ENDPOINT": "http://localhost:9002"},
         )
         subprocess.run(
-            ["python", "scripts/init_iceberg_catalog.py"],
+            [sys.executable, "scripts/init_iceberg_catalog.py"],
             cwd=REPO_ROOT, check=True, timeout=180, capture_output=True, text=True,
             env={
                 **os.environ, **s3_credentials,
@@ -181,7 +185,7 @@ def cdc_chain():
         # published port resolves. This is the CONNECT_URL override it exists for.
         def connector_running() -> bool:
             result = subprocess.run(
-                ["python", "scripts/validate_connector.py"],
+                [sys.executable, "scripts/validate_connector.py"],
                 cwd=REPO_ROOT, env={**env, "CONNECT_URL": "http://localhost:8083"},
                 capture_output=True, text=True, timeout=60,
             )
@@ -208,7 +212,7 @@ def cdc_chain():
         # k8s/base/spark.yaml. Hand-rolling spark-submit here would bypass that guard.
         for layer in ("bronze", "silver", "gold"):
             subprocess.run(
-                ["python", "scripts/run_local_job.py", layer],
+                [sys.executable, "scripts/run_local_job.py", layer],
                 cwd=REPO_ROOT, check=True, timeout=1800,
             )
 

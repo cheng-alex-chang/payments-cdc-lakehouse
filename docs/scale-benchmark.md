@@ -9,6 +9,14 @@ star schema behaves at scale and to find where it breaks.
 exactly; and materializing the staging dedup as a table (vs a view) cuts the conformed
 `dim_date` build from **9.5 min to 11s**.
 
+> **Superseded architecture.** These numbers were measured when `fct_payments_usd` was a dbt
+> incremental model filtered on `MAX(updated_at)`. That watermark has since been removed — it
+> dropped late-arriving rows, never learned about deletes, and froze outright on a future
+> timestamp — and the fact is now a full rebuild from the newest completed snapshot. The
+> measurements below are left as recorded; the incremental figures describe a model that no
+> longer exists. The staging view-vs-table finding still applies and matters more now, since
+> every run rescans the snapshot.
+
 ![Build time by model at 1.06 TB: staging as a view vs a table — dim_date 570.9s to 10.7s (54x), fct_payments_usd 525.3s to 209.6s (2.5x)](images/scale-benchmark-build-times.svg)
 
 ## Method — generate in the warehouse, not on a laptop

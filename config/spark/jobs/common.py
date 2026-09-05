@@ -63,6 +63,8 @@ def iceberg_settings(env: dict | None = None) -> dict:
         "warehouse": source.get("ICEBERG_WAREHOUSE", "payments"),
         "s3_endpoint": source.get("S3_ENDPOINT", "http://minio:9000"),
         "s3_region": source.get("S3_REGION", "us-east-1"),
+        # Iceberg's vectorized Parquet reader, off by default -- see configure_iceberg.
+        "vectorization": source.get("ICEBERG_VECTORIZATION", "false"),
     }
 
 
@@ -101,6 +103,23 @@ def configure_iceberg(builder, env: dict | None = None):
         # only in a streaming job that fails eleven minutes into a run.
         .config(f"{prefix}.s3.remote-signing-enabled", "false")
         .config(f"{prefix}.client.region", settings["s3_region"])
+        # Vectorized reads OFF by default, and this is not a performance preference.
+        #
+        # Iceberg's vectorized Parquet path reads through Arrow's off-heap allocator. On the
+        # arm64 Spark image this stack aborts the JVM outright -- `free(): invalid pointer`
+        # then SIGABRT (exit 134) -- whenever a vectorized scan feeds a shuffle. A plain
+        # COUNT(*) survives; any GROUP BY over an Iceberg table does not, and an in-memory
+        # GROUP BY is fine, which is what isolates it to this reader rather than to Spark.
+        #
+        # That combination is the whole medallion: bronze's offset-uniqueness check, silver's
+        # data-quality groupBy, and gold's hourly aggregate. The crash is native, so it takes
+        # the driver down mid-write rather than failing a task cleanly -- there is no partial
+        # result to inspect and nothing useful in the Spark UI.
+        #
+        # Correctness over throughput until the image ships a fixed Arrow/JVM combination.
+        # Set ICEBERG_VECTORIZATION=true to re-enable where the stack is known good (x86
+        # deployments have not reproduced it); the acceptance suite is the gate for that.
+        .config("spark.sql.iceberg.vectorization.enabled", settings["vectorization"])
         # Structured Streaming checkpoints are plain s3a:// paths, not Iceberg tables, so they go
         # through the Hadoop S3A connector and need their own endpoint settings. The Iceberg
         # catalog's s3.* keys do not apply to it -- a distinction that costs a failed job to learn.

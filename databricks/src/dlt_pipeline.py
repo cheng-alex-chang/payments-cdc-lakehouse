@@ -170,7 +170,13 @@ def payment_metrics_gold():
         )
         .agg(
             count(lit(1)).alias("payment_count"),
+            # gross_volume is ATTEMPTED volume -- every status, matching the Spark gold job.
+            # authorized_volume is the authorized subset. Both are current-state, not
+            # lifecycle: a payment now at `refunded` still counts toward gross_volume.
             spark_sum("amount").cast("decimal(18,2)").alias("gross_volume"),
+            spark_sum(
+                when(col("payment_status") == "authorized", col("amount")).otherwise(0)
+            ).cast("decimal(18,2)").alias("authorized_volume"),
             avg(when(col("payment_status") == "authorized", 1.0).otherwise(0.0)).alias("auth_rate"),
         )
     )
